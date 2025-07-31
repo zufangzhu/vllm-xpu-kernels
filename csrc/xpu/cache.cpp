@@ -56,7 +56,8 @@ void reshape_and_cache_kernel(
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
     if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
-      key_cache[tgt_key_idx] = static_cast<at::Float8_e5m2>(tgt_key * (*k_scale));
+      key_cache[tgt_key_idx] =
+          static_cast<at::Float8_e5m2>(tgt_key * (*k_scale));
       value_cache[tgt_value_idx] =
           static_cast<at::Float8_e5m2>(tgt_value * (*v_scale));
     } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
@@ -96,13 +97,18 @@ void call_reshape_and_cache(
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 void reshape_and_cache_flash_kernel(
-    const scalar_t* __restrict__ key, const scalar_t* __restrict__ value,
-    cache_t* __restrict__ key_cache, cache_t* __restrict__ value_cache,
-    const int64_t* __restrict__ slot_mapping, const int64_t block_stride,
-    const int64_t page_stride, const int64_t head_stride,
-    const int64_t key_stride, const int64_t value_stride, const int num_heads,
-    const int head_size, const int block_size, const float* k_scale,
-    const float* v_scale, const sycl::nd_item<1>& item) {
+    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
+    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
+    cache_t* __restrict__ key_cache,     // [num_blocks, block_size, num_heads,
+                                         // head_size]
+    cache_t* __restrict__ value_cache,   // [num_blocks, block_size, num_heads,
+                                         // head_size]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int64_t block_stride, const int64_t page_stride,
+    const int64_t head_stride, const int64_t key_stride,
+    const int64_t value_stride, const int num_heads, const int head_size,
+    const int block_size, const float* k_scale, const float* v_scale,
+    const sycl::nd_item<1>& item) {
   int64_t group_idx = item.get_group(0);
   int64_t local_idx = item.get_local_id(0);
   int local_range = item.get_local_range(0);
@@ -140,18 +146,13 @@ void reshape_and_cache_flash_kernel(
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 void call_reshape_and_cache_flash(
-    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
-    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
-    cache_t* __restrict__ key_cache,     // [num_blocks, block_size, num_heads,
-                                         // head_size]
-    cache_t* __restrict__ value_cache,   // [num_blocks, block_size, num_heads,
-                                         // head_size]
-    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int64_t block_stride, const int64_t page_stride,
-    const int64_t head_stride, const int64_t key_stride,
-    const int64_t value_stride, const int num_tokens, const int num_heads,
-    const int head_size, const int block_size, const float* k_scale,
-    const float* v_scale) {
+    const scalar_t* __restrict__ key, const scalar_t* __restrict__ value,
+    cache_t* __restrict__ key_cache, cache_t* __restrict__ value_cache,
+    const int64_t* __restrict__ slot_mapping, const int64_t block_stride,
+    const int64_t page_stride, const int64_t head_stride,
+    const int64_t key_stride, const int64_t value_stride, const int num_tokens,
+    const int num_heads, const int head_size, const int block_size,
+    const float* k_scale, const float* v_scale) {
   auto& queue = vllm::xpu::vllmGetQueue();
   int wg = std::min(1024, static_cast<int>(num_heads * head_size));
 
