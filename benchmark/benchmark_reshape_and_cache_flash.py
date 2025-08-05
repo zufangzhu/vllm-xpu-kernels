@@ -142,7 +142,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=["auto", "fp8"],
+        choices=["auto", "fp8", "fp8_e5m2"],
         default="auto",
     )
 

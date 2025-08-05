@@ -78,15 +78,15 @@ def _generate_random_fp8(
     low: float,
     high: float,
 ) -> None:
-    tensor_tmp = torch.empty_like(tensor, dtype=tensor.dtype)
-    tensor_tmp.uniform_(low, high)
     if cache_dtype == "fp8" or cache_dtype == "fp8_e4m3":
-        tensor_tmp.to(torch.float8_e4m3fn)
+        dst_dtype = torch.float8_e4m3fn
     elif cache_dtype == "fp8_e5m2":
-        tensor_tmp.to(torch.float8_e5m2)
+        dst_dtype = torch.float8_e5m2
     else:
         assert False
-    tensor = tensor_tmp
+    tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
+    tensor_tmp.uniform_(low, high)
+    tensor = tensor_tmp.to(dst_dtype)
     del tensor_tmp
 
 def get_kv_cache_torch_dtype(
