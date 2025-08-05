@@ -31,6 +31,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
+
+  ops.def(
+      "fp8_gemm_w8a16(Tensor! A, Tensor! B, bool trans_B, Tensor? B_scale_, Tensor? "
+      "bias_) -> Tensor");
+  ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

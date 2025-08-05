@@ -11,6 +11,7 @@ from shutil import which
 from packaging.version import Version
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+import shutil
 from torch.utils.cpp_extension import SYCL_HOME
 
 
@@ -175,9 +176,35 @@ class cmake_build_ext(build_ext):
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
+
+        import torch
+        my_env = os.environ.copy()
+        cmake_prefix_path = torch.utils.cmake_prefix_path
+        icx_path = shutil.which('icx')
+        icpx_path = shutil.which('icpx')
+        build_option_gpu = {
+            "CMAKE_PREFIX_PATH": cmake_prefix_path,
+            "BUILD_MODULE_TYPE": "GPU",
+            "CMAKE_C_COMPILER": f"{icx_path}",
+            "CMAKE_CXX_COMPILER": f"{icpx_path}",
+        }
+        for var, val in my_env.items():
+            val = val.strip()
+            if var.startswith(("BUILD_", "USE_", "CMAKE_")):
+                if var == "CMAKE_PREFIX_PATH":
+                    # XXX: Do NOT overwrite CMAKE_PREFIX_PATH. Append into the list, instead!
+                    build_option_gpu[var] = ";".join(
+                        [build_option_gpu[var], val.replace(":", ";")]
+                    )
+                    continue
+                build_option_gpu[var] = val
+
+        for key, value in build_option_gpu.items():
+            if value is not None:
+                cmake_args.append("-D{}={}".format(key, value))
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp)
+            cwd=self.build_temp, env=my_env)
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working

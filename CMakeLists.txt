@@ -143,6 +143,8 @@ endif()
 #
 # _C extension
 #
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules)
+find_package(oneDNN QUIET)
 
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_SRC
@@ -156,6 +158,19 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
   list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
+endif()
+
+if(ONEDNN_FOUND)
+
+  message(STATUS "Found oneDNN")
+
+  list(APPEND VLLM_EXT_SRC
+    "csrc/xpu/quantization/onednn/fp8.cpp")
+  include_directories(${ONEDNN_INCLUDE_DIR})
+  link_libraries(${ONEDNN_LIBRARY})
+
+else()
+  message(FATAL_ERROR "NOT Found oneDNN")
 endif()
 
 message(STATUS "Enabling C extension.")
