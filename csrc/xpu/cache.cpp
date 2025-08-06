@@ -1,4 +1,5 @@
 #include <sycl/sycl.hpp>
+#include <assert.h>
 
 #include <algorithm>
 #include <iostream>
@@ -90,6 +91,20 @@ void call_reshape_and_cache(
   });
 }
 
+// Used by vectorization_utils to copy/convert one element
+template <typename OutT, typename InT, Fp8KVCacheDataType kv_dt>
+struct CopyWithScaleOp {
+  float scale;
+
+  inline void operator()(OutT& dst, const InT src) const {
+    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      dst = static_cast<OutT>(src);
+    } else {
+      dst = fp8::scaled_convert<OutT, InT, kv_dt>(src, scale);
+    }
+  }
+};
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 void reshape_and_cache_flash_kernel(
     const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
@@ -113,6 +128,17 @@ void reshape_and_cache_flash_kernel(
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
   const int n = num_heads * head_size;
+
+  // pointers to the beginning of the source row for this token.
+  const scalar_t* __restrict__ key_src = key + group_idx * key_stride;
+  const scalar_t* __restrict__ value_src = value + group_idx * value_stride;
+
+  // find the start position inside the kv-cache for this token.
+  cache_t* __restrict__ key_dst =
+      key_cache + block_idx * block_stride + block_offset * page_stride;
+  cache_t* __restrict__ value_dst =
+      value_cache + block_idx * block_stride + block_offset * page_stride;
+
   for (int i = local_idx; i < n; i += local_range) {
     const int64_t src_key_idx = group_idx * key_stride + i;
     const int64_t src_value_idx = group_idx * value_stride + i;
@@ -121,18 +147,18 @@ void reshape_and_cache_flash_kernel(
     const int64_t dst_idx = block_idx * block_stride +
                             block_offset * page_stride +
                             head_idx * head_stride + head_offset;
+    assert(head_stride == head_size);
+    float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
+    float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
+    constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
 
-    scalar_t tgt_key = key[src_key_idx];
-    scalar_t tgt_value = value[src_value_idx];
-    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
-      key_cache[dst_idx] = tgt_key;
-      value_cache[dst_idx] = tgt_value;
-    } else {
-      key_cache[dst_idx] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, *k_scale);
-      value_cache[dst_idx] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_value, *v_scale);
-    }
+    CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+    CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+    vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, n, local_idx,
+                                       local_range, k_op);
+
+    vectorize_with_alignment<VEC_SIZE>(value_src, value_dst, n, local_idx,
+                                       local_range, v_op);
   }
 }
 
