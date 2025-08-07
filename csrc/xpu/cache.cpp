@@ -8,6 +8,7 @@
 #include "dispatch_utils.h"
 #include "quantization/fp8/quant_utils.hpp"
 #include "utils.h"
+#include "vectorization_utils.hpp"
 
 namespace vllm {
 
@@ -76,7 +77,7 @@ void call_reshape_and_cache(
     const int key_stride, const int value_stride, const int num_heads,
     const int head_size, const int block_size, const int x,
     const float* k_scale, const float* v_scale) {
-  auto& queue = vllm::xpu::vllmGetQueue();
+  auto& queue = vllm::xpu::getCurrentSYCLQueue();
   int wg = std::min(1024, static_cast<int>(num_heads * head_size));
 
   queue.submit([&](sycl::handler& cgh) {
@@ -118,7 +119,7 @@ void reshape_and_cache_flash_kernel(
     const int64_t head_stride, const int64_t key_stride,
     const int64_t value_stride, const int num_heads, const int head_size,
     const int block_size, const float* k_scale, const float* v_scale,
-    const sycl::nd_item<1>& item) {
+    const sycl::nd_item<1>& item, int vec_size) {
   int64_t group_idx = item.get_group(0);
   int64_t local_idx = item.get_local_id(0);
   int local_range = item.get_local_range(0);
@@ -147,18 +148,37 @@ void reshape_and_cache_flash_kernel(
     const int64_t dst_idx = block_idx * block_stride +
                             block_offset * page_stride +
                             head_idx * head_stride + head_offset;
-    assert(head_stride == head_size);
+    assert(head_stride == head_size);  // Only support NHD for flash attn now.
+
     float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
     float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
-    constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
-
     CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
     CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
-    vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, n, local_idx,
-                                       local_range, k_op);
 
-    vectorize_with_alignment<VEC_SIZE>(value_src, value_dst, n, local_idx,
-                                       local_range, v_op);
+#define VECTORIZE_KERNEL(vec_size)                        \
+  vllm::xpu::memory::vectorize_with_alignment<vec_size>(  \
+      key_src, key_dst, n, local_idx, local_range, k_op); \
+  vllm::xpu::memory::vectorize_with_alignment<vec_size>(  \
+      value_src, value_dst, n, local_idx, local_range, v_op);
+
+    switch (vec_size) {
+      case 16:
+        VECTORIZE_KERNEL(16);
+        break;
+      case 8:
+        VECTORIZE_KERNEL(8);
+        break;
+      case 4:
+        VECTORIZE_KERNEL(4);
+        break;
+      case 2:
+        VECTORIZE_KERNEL(2);
+        break;
+      default:
+        VECTORIZE_KERNEL(1);
+        break;
+    }
+#undef VECTORIZE_KERNEL
   }
 }
 
@@ -171,9 +191,10 @@ void call_reshape_and_cache_flash(
     const int64_t key_stride, const int64_t value_stride, const int num_tokens,
     const int num_heads, const int head_size, const int block_size,
     const float* k_scale, const float* v_scale) {
-  auto& queue = vllm::xpu::vllmGetQueue();
+  auto& queue = vllm::xpu::getCurrentSYCLQueue();
   int wg = std::min(1024, static_cast<int>(num_heads * head_size));
 
+  int VEC_SIZE = vllm::xpu::memory::preferred_vector_width<scalar_t>();
   queue.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<1>(sycl::range<1>(num_tokens * wg), sycl::range<1>(wg)),
@@ -181,7 +202,7 @@ void call_reshape_and_cache_flash(
           reshape_and_cache_flash_kernel<scalar_t, cache_t, kv_dt>(
               key, value, key_cache, value_cache, slot_mapping, block_stride,
               page_stride, head_stride, key_stride, value_stride, num_heads,
-              head_size, block_size, k_scale, v_scale, item);
+              head_size, block_size, k_scale, v_scale, item, VEC_SIZE);
         });
   });
 }

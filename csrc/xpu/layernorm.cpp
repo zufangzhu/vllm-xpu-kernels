@@ -3,8 +3,10 @@
 #include <algorithm>
 #include "utils.h"
 #include "dispatch_utils.h"
+#include "xpu/common/runtime.h"
 
 namespace vllm {
+namespace xpu {
 
 template <typename scalar_t>
 void rms_norm_kernel(scalar_t* __restrict__ out,          // [..., hidden_size]
@@ -51,7 +53,7 @@ void call_rms_norm_kernel(torch::Tensor& out, torch::Tensor& input,
   auto weight_ptr = weight.data_ptr<scalar_t>();
   sycl::range<3> grid(1, 1, num_tokens);
   sycl::range<3> block(1, 1, std::min(hidden_size, 1024));
-  auto& queue = vllm::xpu::vllmGetQueue();
+  auto& queue = vllm::xpu::getCurrentSYCLQueue();
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
     cgh.parallel_for(
@@ -114,7 +116,7 @@ void call_fused_add_rms_norm_kernel(torch::Tensor& input,
   int64_t input_stride = input.stride(-2);
   sycl::range<3> grid(1, 1, num_tokens);
   sycl::range<3> block(1, 1, std::min(hidden_size, 1024));
-  auto& queue = vllm::xpu::vllmGetQueue();
+  auto& queue = vllm::xpu::getCurrentSYCLQueue();
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> shared_vals(sycl::range<1>(32), cgh);
     sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
@@ -129,13 +131,14 @@ void call_fused_add_rms_norm_kernel(torch::Tensor& input,
   });
 }
 
+}  // namespace xpu
 }  // namespace vllm
 
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon) {
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_rms_norm_kernel", [&] {
-        vllm::call_rms_norm_kernel<scalar_t>(out, input, weight, epsilon);
+        vllm::xpu::call_rms_norm_kernel<scalar_t>(out, input, weight, epsilon);
       });
 }
 
@@ -144,9 +147,9 @@ void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
 
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(),
-                               "call_fused_add_rms_norm_kernel", [&] {
-                                 vllm::call_fused_add_rms_norm_kernel<scalar_t>(
-                                     input, residual, weight, epsilon);
-                               });
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_fused_add_rms_norm_kernel", [&] {
+        vllm::xpu::call_fused_add_rms_norm_kernel<scalar_t>(input, residual,
+                                                            weight, epsilon);
+      });
 }
