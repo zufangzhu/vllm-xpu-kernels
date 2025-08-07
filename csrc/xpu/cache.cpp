@@ -192,7 +192,8 @@ void call_reshape_and_cache_flash(
     const int num_heads, const int head_size, const int block_size,
     const float* k_scale, const float* v_scale) {
   auto& queue = vllm::xpu::getCurrentSYCLQueue();
-  int wg = std::min(1024, static_cast<int>(num_heads * head_size));
+  int wg = std::min(vllm::xpu::syclMaxWorkGroupSize(),
+                    static_cast<int>(num_heads * head_size));
 
   int VEC_SIZE = vllm::xpu::memory::preferred_vector_width<scalar_t>();
   queue.submit([&](sycl::handler& cgh) {

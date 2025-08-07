@@ -83,7 +83,7 @@ inline int can_vectorize_up_to(at::DeviceIndex dev_id, char* pointer) {
 
 template <int VEC_SIZE, typename InT, typename OutT, typename VecOp,
           typename ScaOp>
-inline void vectorize_with_alignment1(
+inline void vectorize_with_alignment(
     const InT* in, OutT* out, int len, int tid, int stride,
     VecOp&& vec_op,       // vec_n_t<InT,16> -> vec_n_t<OutT,16>
     ScaOp&& scalar_op) {  // InT -> OutT
@@ -151,8 +151,8 @@ template <int VEC_SIZE, typename InT, typename OutT, typename ScaOp>
 inline void vectorize_with_alignment(const InT* in, OutT* out, int len, int tid,
                                      int stride, ScaOp&& scalar_op) {
   using Vec = DefaultVecOp<VEC_SIZE, InT, OutT, std::decay_t<ScaOp>>;
-  vectorize_with_alignment1<VEC_SIZE>(in, out, len, tid, stride, Vec{scalar_op},
-                                      std::forward<ScaOp>(scalar_op));
+  vectorize_with_alignment<VEC_SIZE>(in, out, len, tid, stride, Vec{scalar_op},
+                                     std::forward<ScaOp>(scalar_op));
 }
 
 }  // namespace memory
