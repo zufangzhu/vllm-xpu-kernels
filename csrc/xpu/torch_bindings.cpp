@@ -33,9 +33,32 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 
   ops.def(
-      "fp8_gemm_w8a16(Tensor! A, Tensor! B, bool trans_B, Tensor? B_scale_, Tensor? "
+      "fp8_gemm_w8a16(Tensor! A, Tensor! B, bool trans_B, Tensor? B_scale_, "
+      "Tensor? "
       "bias_) -> Tensor");
   ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
+}
+
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
+  // Reshape the key and value tensors and cache them.
+  cache_ops.def(
+      "reshape_and_cache(Tensor key, Tensor value,"
+      "                  Tensor! key_cache, Tensor! value_cache,"
+      "                  Tensor slot_mapping,"
+      "                  str kv_cache_dtype,"
+      "                  Tensor k_scale, Tensor v_scale) -> ()");
+  cache_ops.impl("reshape_and_cache", torch::kXPU, &reshape_and_cache);
+
+  // Reshape the key and value tensors and cache them.
+  cache_ops.def(
+      "reshape_and_cache_flash(Tensor key, Tensor value,"
+      "                        Tensor! key_cache,"
+      "                        Tensor! value_cache,"
+      "                        Tensor slot_mapping,"
+      "                        str kv_cache_dtype,"
+      "                        Tensor k_scale, Tensor v_scale) -> ()");
+  cache_ops.impl("reshape_and_cache_flash", torch::kXPU,
+                 &reshape_and_cache_flash);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
