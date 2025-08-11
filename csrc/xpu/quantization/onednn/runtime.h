@@ -13,14 +13,10 @@
 #include <oneapi/dnnl/dnnl_sycl.hpp>
 #include <vector>
 
-using namespace dnnl;
 using stream_map =
     ska::flat_hash_map<c10::xpu::XPUStream, std::shared_ptr<dnnl::stream>>;
 
 namespace oneDNN {
-
-// Keep non-static and non-inline
-bool set_onednn_verbose(int level);
 
 static inline dnnl::memory dpcpp_onednn_memory(dnnl::memory::desc md,
                                                dnnl::engine& engine,
@@ -34,7 +30,7 @@ static inline dnnl::memory dpcpp_onednn_memory(dnnl::memory::desc md,
 struct GpuEngineManager {
   static GpuEngineManager& Instance();  // Singleton
 
-  engine& get_engine(const at::Device& device) {
+  dnnl::engine& get_engine(const at::Device& device) {
     TORCH_INTERNAL_ASSERT(device.type() == torch::kXPU);
     TORCH_INTERNAL_ASSERT(device.index() < at::xpu::device_count());
     return *engine_pool[device.index()];

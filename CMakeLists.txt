@@ -166,9 +166,12 @@ if(ONEDNN_FOUND)
   message(STATUS "Found oneDNN")
 
   list(APPEND VLLM_EXT_SRC
+    "csrc/xpu/quantization/onednn/runtime.cpp"
     "csrc/xpu/quantization/onednn/fp8.cpp")
   include_directories(${ONEDNN_INCLUDE_DIR})
+  message(STATUS "oneDNN include directory: ${ONEDNN_INCLUDE_DIR}")
   link_libraries(${ONEDNN_LIBRARY})
+  message(STATUS "oneDNN library: ${ONEDNN_LIBRARY}")
 
 else()
   message(FATAL_ERROR "NOT Found oneDNN")

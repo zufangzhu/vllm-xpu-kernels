@@ -27,10 +27,21 @@ set(ONEDNN_ROOT "${THIRD_PARTY_DIR}/${ONEDNN_DIR}")
 find_path(ONEDNN_INCLUDE_DIR dnnl.hpp dnnl.h PATHS ${ONEDNN_ROOT} PATH_SUFFIXES include)
 
 if(NOT ONEDNN_INCLUDE_DIR)
+    find_package(Git)
+    if(NOT Git_FOUND)
+      message(FATAL_ERROR "Can not find Git executable!")
+    endif()
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} submodule update --init ${ONEDNN_DIR}
+      WORKING_DIRECTORY ${THIRD_PARTY_DIR} COMMAND_ERROR_IS_FATAL ANY)
+    find_path(ONEDNN_INCLUDE_DIR dnnl.hpp dnnl.h PATHS ${ONEDNN_ROOT} PATH_SUFFIXES include)
+endif(NOT ONEDNN_INCLUDE_DIR)
+
+if(NOT ONEDNN_INCLUDE_DIR)
   message(FATAL_ERROR "oneDNN source files not found!")
 endif(NOT ONEDNN_INCLUDE_DIR)
 
-set(DNNL_LIBRARY_TYPE SHARED CACHE STRING "" FORCE)
+set(DNNL_LIBRARY_TYPE STATIC CACHE STRING "" FORCE)
 
 set(DNNL_CPU_RUNTIME "THREADPOOL" CACHE STRING "oneDNN cpu backend" FORCE)
 set(DNNL_GPU_RUNTIME "SYCL" CACHE STRING "oneDNN gpu backend" FORCE)
