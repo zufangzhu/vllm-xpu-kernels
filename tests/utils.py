@@ -78,6 +78,12 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 
+def seed_everything(seed) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
 def _convert_from_fp8(
     tensor: torch.Tensor,
     scale: float = 1.0,

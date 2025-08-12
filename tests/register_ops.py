@@ -20,6 +20,10 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
+    torch.ops._C.silu_and_mul(out, input)
+
+
 def rotary_embedding(
     positions: torch.Tensor,
     query: torch.Tensor,
