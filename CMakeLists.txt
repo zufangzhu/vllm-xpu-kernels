@@ -148,6 +148,7 @@ find_package(oneDNN QUIET)
 
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_SRC
+    "csrc/xpu/cast.cpp"
     "csrc/xpu/cache.cpp"
     "csrc/xpu/layernorm.cpp"
     "csrc/xpu/torch_bindings.cpp"

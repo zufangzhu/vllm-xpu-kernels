@@ -62,3 +62,17 @@ def reshape_and_cache_flash(
         k_scale,
         v_scale,
     )
+
+
+def fp8_gemm_w8a16(
+    a_fp8: torch.Tensor,
+    b_fp16: torch.Tensor,
+    trans_b: bool,
+    b_scale: torch.Tensor = None,
+    bias: torch.Tensor = None,
+    use_ipex: bool = False,
+) -> torch.Tensor:
+    if use_ipex:
+        return torch.ops.torch_ipex.fp8_gemm_w8a16(a_fp8, b_fp16, trans_b,
+                                                   b_scale, bias)
+    return torch.ops._C.fp8_gemm_w8a16(a_fp8, b_fp16, trans_b, b_scale, bias)

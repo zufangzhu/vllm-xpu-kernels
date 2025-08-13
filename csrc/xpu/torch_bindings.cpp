@@ -37,6 +37,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? "
       "bias_) -> Tensor");
   ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
+
+  ops.def(
+      "cast_fp8_to_fp161(Tensor! input, Tensor! output, float scale) -> ()");
+  ops.impl("cast_fp8_to_fp161", torch::kXPU, &cast_fp8_to_fp161);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

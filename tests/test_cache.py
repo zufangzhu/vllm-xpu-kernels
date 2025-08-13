@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from tests.ops.cache_op import reshape_and_cache, reshape_and_cache_flash
-from tests.utils import (_convert_from_fp8, create_kv_caches_with_random,
+from tests.utils import (_convert_to_float, create_kv_caches_with_random,
                          create_kv_caches_with_random_flash, opcheck)
 
 DTYPES = [torch.half, torch.bfloat16]
@@ -83,8 +83,8 @@ def test_reshape_and_cache(
     value_cache_compact = permute_and_compact(value_cache)
 
     if kv_cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
-        cloned_key_cache = _convert_from_fp8(key_cache_compact, k_scale.item())
-        cloned_value_cache = _convert_from_fp8(value_cache_compact,
+        cloned_key_cache = _convert_to_float(key_cache_compact, k_scale.item())
+        cloned_value_cache = _convert_to_float(value_cache_compact,
                                                v_scale.item())
     else:
         cloned_key_cache = key_cache_compact.clone()
@@ -130,8 +130,8 @@ def test_reshape_and_cache(
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
 
     if kv_cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
-        result_key_cache = _convert_from_fp8(key_cache_compact, k_scale.item())
-        result_value_cache = _convert_from_fp8(value_cache_compact,
+        result_key_cache = _convert_to_float(key_cache_compact, k_scale.item())
+        result_value_cache = _convert_to_float(value_cache_compact,
                                                v_scale.item())
         torch.testing.assert_close(result_key_cache,
                                    cloned_key_cache,
@@ -212,8 +212,8 @@ def test_reshape_and_cache_flash(
 
     # Clone the KV caches.
     if kv_cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
-        cloned_key_cache = _convert_from_fp8(key_cache_compact, k_scale.item())
-        cloned_value_cache = _convert_from_fp8(value_cache_compact,
+        cloned_key_cache = _convert_to_float(key_cache_compact, k_scale.item())
+        cloned_value_cache = _convert_to_float(value_cache_compact,
                                                v_scale.item())
     else:
         cloned_key_cache = key_cache_compact.clone()
@@ -257,8 +257,8 @@ def test_reshape_and_cache_flash(
         cloned_key_cache[block_idx, block_offset, :, :] = key[i]
         cloned_value_cache[block_idx, block_offset, :, :] = value[i]
     if kv_cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
-        result_key_cache = _convert_from_fp8(key_cache_compact, k_scale.item())
-        result_value_cache = _convert_from_fp8(value_cache_compact,
+        result_key_cache = _convert_to_float(key_cache_compact, k_scale.item())
+        result_value_cache = _convert_to_float(value_cache_compact,
                                                v_scale.item())
         torch.testing.assert_close(result_key_cache,
                                    cloned_key_cache,

@@ -78,7 +78,42 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 
-def _convert_from_fp8(
+def _cast_to_fp8(
+    tensor: torch.Tensor,
+    scale: Optional[torch.Tensor] = None,
+    fp8_dtype: str = "fp8_e4m3",
+) -> torch.Tensor:
+    if fp8_dtype not in ["fp8_e4m3", "fp8_e5m2"]:
+        raise ValueError(f"Unsupported fp8 dtype: {fp8_dtype}")
+    if scale is None:
+        scale = torch.tensor([1.0], dtype=torch.float32, device=tensor.device)
+    tensor_tmp = tensor.to(torch.float)
+    tensor_tmp = tensor_tmp / scale
+    if fp8_dtype == "fp8_e4m3":
+        tensor_fp8 = tensor_tmp.to(torch.float8_e4m3fn)
+    elif fp8_dtype == "fp8_e5m2":
+        tensor_fp8 = tensor_tmp.to(torch.float8_e5m2)
+    else:
+        raise ValueError(f"Unsupported fp8 dtype: {fp8_dtype}")
+    return tensor_fp8
+
+
+def _cast_from_fp8(
+    tensor_fp8: torch.Tensor,
+    scale: Optional[torch.Tensor] = None,
+    dtype: torch.dtype = torch.half,
+) -> torch.Tensor:
+    if tensor_fp8.dtype not in [torch.float8_e5m2, torch.float8_e4m3fn]:
+        raise ValueError(f"Unsupported fp8 dtype: {tensor_fp8.dtype}")
+    if scale is None:
+        scale = torch.tensor([1.0],
+                             dtype=torch.float32,
+                             device=tensor_fp8.device)
+    tensor = tensor_fp8.to(torch.float)
+    return (tensor * scale).to(dtype)
+
+
+def _convert_to_float(
     tensor: torch.Tensor,
     scale: float = 1.0,
 ) -> torch.Tensor:

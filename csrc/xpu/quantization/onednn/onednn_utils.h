@@ -1,6 +1,6 @@
 #pragma once
-#include "lru_cache.h"
-#include "runtime.h"
+#include "xpu/quantization/onednn/lru_cache.h"
+#include "xpu/quantization/onednn/runtime.h"
 #include <ATen/ATen.h>
 
 #include <oneapi/dnnl/dnnl.h>
