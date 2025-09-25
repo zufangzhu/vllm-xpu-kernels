@@ -177,6 +177,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   FetchContent_Declare(
       cutlass-sycl
       GIT_REPOSITORY https://github.com/intel/cutlass-sycl
+
       # Please keep this in sync with CUTLASS_REVISION line above.
       GIT_TAG ${CUTLASS_REVISION}
       GIT_PROGRESS TRUE
@@ -196,7 +197,6 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CUTLASS_ENABLE_GDC_FOR_SM100_DEFAULT OFF CACHE BOOL "DISABLE CUDA")
   # list(APPEND CMAKE_CXX_FLAGS "-ftemplate-backtrace-limit=0 " )
   # list(APPEND CMAKE_CXX_FLAGS "-fdiagnostics-color=always " )
-  
 
   FetchContent_MakeAvailable(cutlass-sycl)
   set(CUTLASS_INCLUDE_DIR ${cutlass-sycl_SOURCE_DIR}/include CACHE PATH "CUTLASS Header Library")
@@ -269,11 +269,15 @@ endif ()
 #
 # xpu only ops/kernels, implemented with cutlass/onednn/sycl.
 #
+file(GLOB CUTLASS_BACKEND_SRCS
+  csrc/xpu/cutlass_kernels/*.cpp
+)
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_XPU_SRC
     "csrc/xpu/torch_bindings.cpp"
     "csrc/xpu/lora/lora_shrink.cpp"
     "csrc/xpu/lora/lora_expand.cpp"
+    ${CUTLASS_BACKEND_SRCS}
   )
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})
@@ -282,6 +286,12 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
   list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
+  # CUTLASS FLAGS
+  list(APPEND VLLM_GPU_FLAGS "-O3" "-DNDEBUG")
+  list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
+  list(APPEND VLLM_GPU_FLAGS "-fsycl" "-fsycl-targets=spir64_gen" "-ftemplate-backtrace-limit=10")
+  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64_gen")
+  list(APPEND VLLM_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen "-device bmg-g21-a0 -internal_options -cl-intel-256-GRF-per-thread")
 endif()
 
 if(ONEDNN_FOUND)
@@ -305,6 +315,8 @@ define_gpu_extension_target(
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${VLLM_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
 

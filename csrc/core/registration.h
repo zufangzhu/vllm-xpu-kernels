@@ -1,5 +1,4 @@
 #pragma once
-
 #include <Python.h>
 
 #define _CONCAT(A, B) A##B
