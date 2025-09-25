@@ -28,6 +28,16 @@ def random_partition(size_a: int, target: int):
     return result
 
 
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "m,n,k": [(1, 256, 128), (4, 512, 256), (16, 512, 512)],
+        "e": [16, 8],
+        "topk": [1, 2],
+        "dtype": [torch.bfloat16]
+    }
+}
+
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -36,7 +46,6 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
     seed_everything(7)
     num_experts = e
     token_per_group = random_partition(e, m * topk)
-    print(token_per_group)
     # input
     input_A = torch.randn((sum(token_per_group), k),
                           dtype=dtype,
