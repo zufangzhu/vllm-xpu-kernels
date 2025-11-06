@@ -15,11 +15,18 @@ torch::Tensor int4_gemm_w4a16(const torch::Tensor& A_, const torch::Tensor& B,
                               const std::optional<torch::Tensor>& g_idx);
 
 torch::Tensor cutlass_grouped_gemm(torch::Tensor ptr_A, torch::Tensor ptr_B,
-                                   torch::Tensor ptr_D, torch::Tensor ptr_alpha,
-                                   torch::Tensor ptr_beta, torch::Tensor offset,
+                                   torch::Tensor ptr_D,
+                                   torch::Tensor expert_token_count,
+                                   torch::Tensor expert_first_token_offset,
                                    int64_t N, int64_t K, int64_t groups);
 
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     const at::Tensor& positions, const at::Tensor& query, const at::Tensor& key,
     const c10::optional<at::Tensor>& offsets_opt,
     const at::Tensor& cos_sin_cache, int64_t rotary_dim, bool is_neox);
+
+void fused_moe(torch::Tensor output, torch::Tensor input,
+               torch::Tensor token_selected_experts,
+               torch::Tensor token_final_scales,
+               torch::Tensor fc1_expert_weights,
+               torch::Tensor fc2_expert_weights, torch::Tensor workspace);

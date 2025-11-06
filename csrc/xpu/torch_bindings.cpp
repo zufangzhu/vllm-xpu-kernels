@@ -2,6 +2,7 @@
 #include "xpu/ops.h"
 #include "xpu/cutlass_kernels/grouped_gemm.hpp"
 #include "xpu/lora/lora_ops.h"
+#include "xpu/cutlass_kernels/fused_moe.hpp"
 
 #include <torch/library.h>
 #include <torch/version.h>
@@ -21,7 +22,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def(
       "cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor ptr_D, Tensor "
-      "ptr_alpha, Tensor ptr_beta, Tensor offset, int N, int K, int groups) -> "
+      "expert_token_count, Tensor expert_first_token_offset, int N, int K, int "
+      "groups) -> "
       "Tensor");
   xpu_ops.impl("cutlass_grouped_gemm", torch::kXPU,
                gpu::cutlass_kernel::grouped_gemm_func);
@@ -47,6 +49,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "bgmv_expand_slice(Tensor! outputs, Tensor inputs, Tensor weights, "
       "Tensor indices, int slice_offset,bool add_to_output) -> ()");
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
+
+  xpu_ops.def(
+      "fused_moe(Tensor output, Tensor input, Tensor token_selected_experts, "
+      "Tensor "
+      "token_final_scales, Tensor fc1_expert_weights, Tensor "
+      "fc2_expert_weights, Tensor workspace) -> "
+      "()");
+  xpu_ops.impl("fused_moe", torch::kXPU, &fused_moe);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
