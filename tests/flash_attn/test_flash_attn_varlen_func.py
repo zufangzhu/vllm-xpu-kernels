@@ -116,8 +116,8 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("fa_version", [2])
 @pytest.mark.parametrize("q_dtype", QDTYPES)
-@pytest.mark.parametrize("is_sink", [False])
-@pytest.mark.parametrize("is_casual", [False])
+@pytest.mark.parametrize("is_sink", SINK)
+@pytest.mark.parametrize("is_casual", CASUAL)
 @torch.inference_mode()
 def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -134,6 +134,9 @@ def test_varlen_with_paged_kv(
     is_casual: bool,
 ) -> None:
     torch.set_default_device("xpu")
+    # FIXME: remove skip
+    if is_casual and seq_lens[1][0] == 5:
+        pytest.skip("skip casual for seqlen0 to avoid runtime hang on CI.")
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
