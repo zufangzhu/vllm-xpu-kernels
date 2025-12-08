@@ -137,7 +137,7 @@ torch::Tensor int4_gemm_w4a8(
       "Int4-Int8 matmul expects quantized input A to be per-token ([b*m,1]) or "
       "per-tensor ([b]) quantized!");
 
-  torch::Tensor result = check_and_create_output_tensor(A, B, A.scalar_type());
+  torch::Tensor result = check_and_create_output_tensor(A, B, torch::kHalf);
 
   oneDNN::dnnl_matmul_w4a8_int4(
       result, A, A_scale, A_zp, B, B_scale, B_zp, group_size, bias);

@@ -35,7 +35,8 @@
 #define VLLM_DISPATCH_CASE_QUANT_TYPES(...)                    \
   AT_DISPATCH_CASE(at::ScalarType::Float8_e4m3fn, __VA_ARGS__) \
   AT_DISPATCH_CASE(at::ScalarType::Float8_e5m2, __VA_ARGS__)   \
-  AT_DISPATCH_CASE(at::ScalarType::Char, __VA_ARGS__)
+  AT_DISPATCH_CASE(at::ScalarType::Char, __VA_ARGS__)          \
+  AT_DISPATCH_CASE(at::ScalarType::Byte, __VA_ARGS__)
 
 // When using this dispatch macro, the type is 'fp8_t' not 'scalar_t'.
 // See AT_DISPATCH_FP8_CASE above.
