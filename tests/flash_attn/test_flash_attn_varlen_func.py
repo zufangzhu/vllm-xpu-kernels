@@ -18,7 +18,7 @@ QDTYPES = [None]
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
 SOFT_CAPS = [None]
-SLIDING_WINDOWS = [(-1, 2), (2, -1), (11, 3), (-1, -1)]
+SLIDING_WINDOWS = [(-1, 127), (127, -1), (127, 127), (-1, -1)]
 SINK = [False, True]
 CASUAL = [False, True]
 
@@ -56,8 +56,10 @@ def ref_paged_attn(query: torch.Tensor,
         v = v[:kv_len]
 
         if q.shape[1] != k.shape[1]:
-            k = torch.repeat_interleave(k, q.shape[1] // k.shape[1], dim=1)
-            v = torch.repeat_interleave(v, q.shape[1] // v.shape[1], dim=1)
+            k = torch.repeat_interleave(k, q.shape[1] // k.shape[1],
+                                        dim=1).contiguous()
+            v = torch.repeat_interleave(v, q.shape[1] // v.shape[1],
+                                        dim=1).contiguous()
         attn = torch.einsum("qhd,khd->hqk", q, k).float()
         empty_mask = torch.ones(query_len, kv_len)
         mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
@@ -111,7 +113,7 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("window_size", [(-1, -1)])
+@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
@@ -135,15 +137,20 @@ def test_varlen_with_paged_kv(
     is_casual: bool,
 ) -> None:
     torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
     # # FIXME: remove skip
     if (is_casual and seq_lens[1][0]
             == 5) and (os.getenv("SKIP_HANG_KERNEL") is not None
                        and os.getenv("SKIP_HANG_KERNEL") == "1"):
         pytest.skip("skip casual for seqlen0 to avoid runtime hang on CI.")
+    if (window_size[0] != -1 or window_size[1]
+            != -1) and (os.getenv("SKIP_HANG_KERNEL") is not None
+                        and os.getenv("SKIP_HANG_KERNEL") == "1"):
+        pytest.skip("skip local attn to avoid runtime hang on CI.")
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
-    torch.manual_seed(0)
+    torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
@@ -221,8 +228,10 @@ def test_varlen_with_paged_kv(
                                 sink=sink,
                                 window_size_left=window_size[0],
                                 window_size_right=window_size[1])
-    atol, rtol = 1.5e-2, 1e-2
+    atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
+    if window_size[0] != -1 or window_size[1] != -1:
+        atol, rtol = 1.5e-2, 1.5e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
