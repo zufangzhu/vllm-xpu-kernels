@@ -51,7 +51,9 @@ static inline void dnnl_matmul_w4a16_int4(
     leading_dim = mat1_strides[0] < mat1_strides[1] ? 0 : 1;
   } else {
     TORCH_CHECK(
-        false, "Unsupported input dimension for int4-f16/bf16 matmul: ", mat1.dim());
+        false,
+        "Unsupported input dimension for int4-f16/bf16 matmul: ",
+        mat1.dim());
   }
   int64_t lda = mat1_strides[leading_dim];
   int64_t ldb = mat2.strides()[mat2.dim() - 1] * 8;

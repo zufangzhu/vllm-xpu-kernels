@@ -4,18 +4,14 @@ from enum import Enum
 import pytest
 import torch
 
-from tests.register_ops import int4_gemm_w4a16, int4_gemm_w4a8
-from tests.ops.fp8_quant_op import scaled_fp8_quant
-from vllm_xpu_kernels.quantization._quantize_convert import (GPTQUtils,
-                                                             dequantize,
-                                                             dequantize_s8_to_float,
-                                                             dynamic_per_token_quant_ref,
-                                                             dynamic_per_tensor_quant_ref)
+from tests.register_ops import int4_gemm_w4a8, int4_gemm_w4a16
+from vllm_xpu_kernels.quantization._quantize_convert import (
+    GPTQUtils, dequantize, dequantize_s8_to_float, dynamic_per_token_quant_ref)
 
 BATCHES = [1]
 MNK_FACTORS = [
-    (8, 256, 256),
-    (4, 4096, 11008),
+    (8, 4096, 4096),
+    (1, 4096, 11008),
     (32, 4096, 4096),
 ]
 
@@ -33,7 +29,7 @@ MINI_PYTEST_PARAMS = {
 
 
 def rand_int4(size, dtype=torch.int32, device="xpu"):
-    rand = torch.ones([size // 2], device=device).to(torch.int8)
+    rand = torch.randint(-128, 128, [size // 2], device=device).to(torch.int8)
     return rand.view(dtype=dtype)
 
 
@@ -99,6 +95,7 @@ def test_int4_gemm_w4a16(dtype, act_order, mnk_factors, qmode: QuantMode):
         rtol=1e-2,
     )
 
+
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("act_order", [False, True])
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
@@ -111,9 +108,8 @@ def test_int4_gemm_w4a8(dtype, act_order, mnk_factors, qmode: QuantMode):
     input = torch.randn([m, k], device="xpu", dtype=dtype)
     input_int8, input_scales, input_zero_points = dynamic_per_token_quant_ref(
         input, False, bits=8)
-    input_int8_dequant = dequantize_s8_to_float(
-        input_int8, input_scales, input_zero_points).to("cpu")
-    input_torch = input.cpu()
+    input_int8_dequant = dequantize_s8_to_float(input_int8, input_scales,
+                                                input_zero_points).to("cpu")
     weight = rand_int4(k * n, torch.int32, "xpu").reshape(k // 8, n)
 
     group_size = min(128, k)
@@ -145,8 +141,6 @@ def test_int4_gemm_w4a8(dtype, act_order, mnk_factors, qmode: QuantMode):
     if qmode == QuantMode.SYM:
         zero_points = torch.Tensor([8]).to(torch.int8).to("xpu")
 
-    
-   
     output_int4 = int4_gemm_w4a8(
         input_int8,
         input_scales,
@@ -164,4 +158,3 @@ def test_int4_gemm_w4a8(dtype, act_order, mnk_factors, qmode: QuantMode):
         atol=3e-1,
         rtol=3e-1,
     )
-    

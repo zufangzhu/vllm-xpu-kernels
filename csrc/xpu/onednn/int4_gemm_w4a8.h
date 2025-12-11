@@ -116,8 +116,10 @@ static inline void dnnl_matmul_w4a8_int4(
 
   // Encode the number of elements of m1_sc and m2_sc into a single int64_t:
   // upper 32 bits: m1_sc.numel(), lower 32 bits: m2_sc.numel()
-  int64_t sc_group_size = (static_cast<int64_t>(m1_sc.numel()) << 32) | static_cast<int64_t>(m2_sc.numel());
-  int64_t zp_group_size = (static_cast<int64_t>(m1_zp.numel()) << 32) | static_cast<int64_t>(m2_zp.numel());
+  int64_t sc_group_size = (static_cast<int64_t>(m1_sc.numel()) << 32) |
+                          static_cast<int64_t>(m2_sc.numel());
+  int64_t zp_group_size = (static_cast<int64_t>(m1_zp.numel()) << 32) |
+                          static_cast<int64_t>(m2_zp.numel());
   auto& matmul_ext = matmul_primitive_create_and_cache(
       jd,
       trans_type_t::nt,
