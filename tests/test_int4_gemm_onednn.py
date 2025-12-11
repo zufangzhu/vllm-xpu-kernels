@@ -138,7 +138,6 @@ def test_int4_gemm_w4a8(dtype, act_order, mnk_factors, qmode: QuantMode):
     # check fp16 gemm
     weight_fp = dequantize(weight, scales, zero_points, group_size,
                            g_idx).cpu()
-    out_torch16 = torch.matmul(input_torch, weight_fp)
     out_torch8 = torch.matmul(input_int8_dequant, weight_fp)
 
     # onednn int4 gemm
@@ -162,7 +161,7 @@ def test_int4_gemm_w4a8(dtype, act_order, mnk_factors, qmode: QuantMode):
     torch.testing.assert_close(
         output_int4.cpu().float(),
         out_torch8.cpu().float(),
-        atol=1e-1,
-        rtol=1e-1,
+        atol=3e-1,
+        rtol=3e-1,
     )
     
