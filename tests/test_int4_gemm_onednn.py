@@ -139,7 +139,7 @@ def test_int4_gemm_w4a8(dtype, act_order, mnk_factors, qmode: QuantMode):
     # onednn int4 gemm
     weight_ba = shuffled_weight.transpose(0, 1).contiguous().transpose(0, 1)
     if qmode == QuantMode.SYM:
-        zero_points = torch.Tensor([8]).to(torch.int8).to("xpu")
+        zero_points = torch.tensor([8], dtype=torch.int8, device="xpu")
 
     output_int4 = int4_gemm_w4a8(
         input_int8,

@@ -288,8 +288,8 @@ def dynamic_per_tensor_quant_ref(input, use_sym_quant, bits):
     if use_sym_quant:
         scale_val = torch.maximum(torch.abs(min_val),
                                   torch.abs(max_val)) / qmax
-        scale = torch.Tensor([scale_val]).to("xpu")
-        zero_point = torch.Tensor([0]).to(torch.int32).to("xpu")
+        scale = torch.tensor([scale_val]).to("xpu")
+        zero_point = torch.tensor([0], dtype=torch.int32, device="xpu")
     else:
         scale = (max_val - min_val) / qmax
         zero_point = -1 * torch.round(min_val / scale).to(dtype=torch.int32)
