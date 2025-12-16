@@ -144,7 +144,7 @@ def xpu_fused_moe(hidden_states,
     is_mxfp4: bool
     '''
 
-    output = torch.zeros_like(hidden_states)
+    output = torch.empty_like(hidden_states)
     inter_size = list(w13.shape)[-2] // 2
 
     assert w13.is_contiguous() and w2.is_contiguous()
@@ -160,12 +160,17 @@ def xpu_fused_moe(hidden_states,
         else:
             inter_size = w13.inter_size
 
-    if is_int4:
+    if is_int4 and not hasattr(w13, 'xpu_fused_moe'):
+        w13_tmp = torch.empty_like(w13)
+        w2_tmp = torch.empty_like(w2)
         for i in range(num_experts):
-            w13[i] = implement_zp(w13[i])
-            w2[i] = implement_zp(w2[i])
-        w13.contiguous()
-        w2.contiguous()
+            w13_tmp[i] = implement_zp(w13[i])
+            w2_tmp[i] = implement_zp(w2[i])
+        w13_tmp = w13_tmp.contiguous()
+        w2_tmp = w2_tmp.contiguous()
+        w13.data = w13_tmp
+        w2.data = w2_tmp
+        w13.xpu_fused_moe = True
 
     # TODO: will all integrated in Cpp func. Temporary expose before gemm fusion
     num_rows, hidden_size = list(hidden_states.shape)
@@ -216,8 +221,7 @@ def xpu_fused_moe(hidden_states,
                             device=hidden_states.device)
     if topk_ids.dtype == torch.int32:
         topk_ids = topk_ids.to(torch.int64)
-    torch.ops._xpu_C.fused_moe(output=output,
-                               input=hidden_states,
+    torch.ops._xpu_C.fused_moe(input=hidden_states,
                                token_selected_experts=topk_ids,
                                token_final_scales=topk_weights,
                                workspace=workspace,
@@ -229,10 +233,10 @@ def xpu_fused_moe(hidden_states,
         ws_map["expert_first_token_offset"][1]:
         ws_map["expert_first_token_offset"][1] +
         expert_first_token_offset_size].view(torch.int64)
-    permuted_row_to_unpermuted_row = workspace[
-        ws_map["permuted_row_to_unpermuted_row"][1]:
-        ws_map["permuted_row_to_unpermuted_row"][1] +
-        permuted_row_to_unpermuted_row_size].view(torch.int32)
+    unpermuted_row_to_permuted_row = workspace[
+        ws_map["unpermuted_row_to_permuted_row"][1]:
+        ws_map["unpermuted_row_to_permuted_row"][1] +
+        src_to_dest_map_size].view(torch.int32)
     gemm1_input = workspace[ws_map["overlapped_gemm1_gemm2_inputs"][1]:
                             ws_map["overlapped_gemm1_gemm2_inputs"][1] +
                             permuted_data_size].view(hidden_states.dtype).view(
@@ -328,24 +332,7 @@ def xpu_fused_moe(hidden_states,
             is_B_int4=is_int4,
             is_B_mxfp4=is_mxfp4)
 
-    expert_cache = output
-
-    iter_for_weight_apply = expert_first_token_offset[1:]
-    for expert_id, end_idx in enumerate(iter_for_weight_apply):
-        start_idx = 0 if expert_id == 0 else iter_for_weight_apply[expert_id -
-                                                                   1]
-        if start_idx == end_idx:
-            continue
-
-        exp_token_idxs = permuted_row_to_unpermuted_row[start_idx:end_idx]
-        scores_token_ids = exp_token_idxs % num_rows
-        scores_k_slot = exp_token_idxs // num_rows
-        scores = topk_weights[scores_token_ids, scores_k_slot]
-        expert_out = gemm2_output[start_idx:end_idx]
-        expert_out.mul_(scores.view(-1, 1))
-        expert_cache.scatter_reduce_(0,
-                                     scores_token_ids.view(-1, 1).repeat(
-                                         1, hidden_size),
-                                     expert_out,
-                                     reduce='sum')
+    torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
+                                unpermuted_row_to_permuted_row,
+                                num_experts_per_node)
     return output
