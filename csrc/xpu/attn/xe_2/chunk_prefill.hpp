@@ -16,9 +16,9 @@
 
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
-#include "csrc/xpu/attn/collective/chunk_prefill_scheduler.hpp"
-#include "csrc/xpu/attn/collective/chunk_prefill_epilogue.hpp"
-#include "chunk_prefill_kernel.hpp"
+#include "collective/chunk_prefill_scheduler.hpp"
+#include "collective/chunk_prefill_epilogue.hpp"
+#include "kernel/chunk_prefill_kernel.hpp"
 
 #include "fmha_utils.hpp"
 
@@ -233,10 +233,10 @@ struct FMHAConfig {
       decltype(cutlass::fmha::collective::get_sg_layout_pv(SubgroupLayoutQK{})),
       SubgroupLayoutPV_>;
 
-  template <class Scheduler, bool Causal, bool Local, bool Sink>
+  template <class Scheduler, bool Paged, bool Causal, bool Local, bool Sink>
   static void run(sycl::queue& queue, const chunk_prefill_args_t& args) {
     constexpr bool VarLen = true;
-    constexpr bool Paged = true;
+    // constexpr bool Paged = true;
     cutlass::KernelHardwareInfo hw_info;
 
     using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape<VarLen>;
@@ -337,7 +337,12 @@ void policy_dispatch(
         half_t,
         half_t>::
         kernel_dispatch(
-            queue, args, args.is_causal, args.is_local, args.is_sink);
+            queue,
+            args,
+            args.is_paged,
+            args.is_causal,
+            args.is_local,
+            args.is_sink);
   } else {
     return FMHAConfig<
         typename chunk_policy::ShapeQK,
@@ -347,7 +352,12 @@ void policy_dispatch(
         void,
         PipelineStages>::
         kernel_dispatch(
-            queue, args, args.is_causal, args.is_local, args.is_sink);
+            queue,
+            args,
+            args.is_paged,
+            args.is_causal,
+            args.is_local,
+            args.is_sink);
   }
 }
 
@@ -416,7 +426,7 @@ void cutlass_chunk_prefill_impl(
       key_cache.data_ptr(),
       value_cache.data_ptr(),
       out.data_ptr(),
-      block_table.data_ptr(),
+      is_paged ? block_table.data_ptr() : nullptr,
       cu_seqlens_q.data_ptr(),
       cu_seqlens_k.data_ptr(),
       max_seqlen_q,
@@ -447,13 +457,15 @@ void cutlass_chunk_prefill_impl(
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
 
-  if (args.head_size == HEAD_SIZE_LIMIT_0) {
+  if (args.head_size <= HEAD_SIZE_LIMIT_0) {
     policy_dispatch<chunk_policy_head64>(queue, cuType, args);
-  } else if (args.head_size == HEAD_SIZE_LIMIT_1) {
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
+    policy_dispatch<chunk_policy_head96>(queue, cuType, args);
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
     policy_dispatch<chunk_policy_head128>(queue, cuType, args);
-  } else if (args.head_size == HEAD_SIZE_LIMIT_2) {
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
     policy_dispatch<chunk_policy_head192>(queue, cuType, args);
-  } else if (args.head_size == HEAD_SIZE_LIMIT_3) {
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
     policy_dispatch<chunk_policy_head256>(queue, cuType, args);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
