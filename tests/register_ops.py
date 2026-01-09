@@ -133,12 +133,14 @@ def concat_and_cache_mla(
                                                 scale)
 
 
-def gather_cache(src_cache: torch.Tensor,
-                 dst: torch.Tensor,
-                 block_table: torch.Tensor,
-                 cu_seq_lens: torch.Tensor,
-                 batch_size: int,
-                 seq_starts: Optional[torch.Tensor] = None) -> None:
+def gather_cache(
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    batch_size: int,
+    seq_starts: Optional[torch.Tensor] = None,
+) -> None:
     torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
                                         cu_seq_lens, batch_size, seq_starts)
 
@@ -208,40 +210,73 @@ def swigluoai_and_mul(
 
 
 # onednn gemm
-def int4_gemm_w4a16(input: torch.Tensor, weight: torch.Tensor,
-                    bias: Optional[torch.Tensor], scales: torch.Tensor,
-                    zero_points: torch.Tensor, group_size: int,
-                    g_idx: Optional[torch.Tensor]):
+def int4_gemm_w4a16(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    scales: torch.Tensor,
+    zero_points: torch.Tensor,
+    group_size: int,
+    g_idx: Optional[torch.Tensor],
+):
     return torch.ops._xpu_C.int4_gemm_w4a16(input, weight, bias, scales,
                                             zero_points, group_size, g_idx)
 
 
-def int4_gemm_w4a8(input: torch.Tensor,
-                   input_scales: torch.Tensor,
-                   input_zero_points: torch.Tensor,
-                   weight: torch.Tensor,
-                   wei_scales: torch.Tensor,
-                   wei_zero_points: torch.Tensor,
-                   group_size: int,
-                   g_idx: Optional[torch.Tensor],
-                   bias: Optional[torch.Tensor] = None):
-    return torch.ops._xpu_C.int4_gemm_w4a8(input, input_scales,
-                                           input_zero_points, weight,
-                                           wei_scales, wei_zero_points,
-                                           group_size, g_idx, bias)
+def int4_gemm_w4a8(
+    input: torch.Tensor,
+    input_scales: torch.Tensor,
+    input_zero_points: torch.Tensor,
+    weight: torch.Tensor,
+    wei_scales: torch.Tensor,
+    wei_zero_points: torch.Tensor,
+    group_size: int,
+    g_idx: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor] = None,
+):
+    return torch.ops._xpu_C.int4_gemm_w4a8(
+        input,
+        input_scales,
+        input_zero_points,
+        weight,
+        wei_scales,
+        wei_zero_points,
+        group_size,
+        g_idx,
+        bias,
+    )
 
 
-def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
-             out_dtype: Optional[torch.dtype],
-             scale_act: Optional[torch.Tensor],
-             scale_wei: Optional[torch.Tensor], bias: Optional[torch.Tensor]):
+def fp8_gemm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: Optional[torch.dtype],
+    scale_act: Optional[torch.Tensor],
+    scale_wei: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+):
     return torch.ops._xpu_C.fp8_gemm(input, weight, out_dtype, scale_act,
                                      scale_wei, bias)
 
 
-def fp8_gemm_w8a16(input: torch.Tensor, weight: torch.Tensor,
-                   scale_wei: Optional[torch.Tensor],
-                   scale_act: Optional[torch.Tensor]):
+def fp4_gemm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scale_act: torch.Tensor,
+    scale_wei: torch.Tensor,
+    out_dtype: Optional[torch.dtype],
+    bias: Optional[torch.Tensor],
+):
+    return torch.ops._xpu_C.fp4_gemm(input, weight, scale_act, scale_wei,
+                                     out_dtype, bias)
+
+
+def fp8_gemm_w8a16(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scale_wei: Optional[torch.Tensor],
+    scale_act: Optional[torch.Tensor],
+):
     return torch.ops._xpu_C.fp8_gemm_w8a16(input, weight, scale_wei, scale_act)
 
 
@@ -320,12 +355,24 @@ def batched_moe_align_block_size(
     )
 
 
-def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
-                 num_expert_group: int, topk_group: int, topk: int,
-                 renormalize: bool, routed_scaling_factor: float):
-    return torch.ops._moe_C.grouped_topk(scores, scores_with_bias,
-                                         num_expert_group, topk_group, topk,
-                                         renormalize, routed_scaling_factor)
+def grouped_topk(
+    scores: torch.Tensor,
+    scores_with_bias: torch.Tensor,
+    num_expert_group: int,
+    topk_group: int,
+    topk: int,
+    renormalize: bool,
+    routed_scaling_factor: float,
+):
+    return torch.ops._moe_C.grouped_topk(
+        scores,
+        scores_with_bias,
+        num_expert_group,
+        topk_group,
+        topk,
+        renormalize,
+        routed_scaling_factor,
+    )
 
 
 def fused_grouped_topk(
@@ -339,12 +386,17 @@ def fused_grouped_topk(
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: Optional[torch.Tensor] = None,
 ):
-    return torch.ops._moe_C.fused_grouped_topk(hidden_states, gating_output,
-                                               topk, renormalize,
-                                               num_expert_group, topk_group,
-                                               scoring_func,
-                                               routed_scaling_factor,
-                                               e_score_correction_bias)
+    return torch.ops._moe_C.fused_grouped_topk(
+        hidden_states,
+        gating_output,
+        topk,
+        renormalize,
+        num_expert_group,
+        topk_group,
+        scoring_func,
+        routed_scaling_factor,
+        e_score_correction_bias,
+    )
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
