@@ -94,8 +94,12 @@ def _floatx_unpacked_to_f32(x: Tensor, ebits: int, mbits: int) -> Tensor:
                                   left_shift) << MBITS_F32
 
                 # we can update this in-place since the values won't overlap
+<<<<<<< HEAD
                 # torch.compile() may complain unsupported operand type(s)
                 # for|: 'SymInt' and 'int'
+=======
+                # torch.compile() may complain unsupported operand type(s) for |: 'SymInt' and 'int'
+>>>>>>> 34b2f81 ([OneDNN] add mxfp8, mxfp4 onednn gemm  (#20))
                 # thus we use + instead of | here
                 mantissa_lp_int32[mantissa_lp_int32 == mantissa_cmp] = (
                     exp_biased_f32 + mantissa_f32)
@@ -224,8 +228,11 @@ def _f32_to_floatx_unpacked(x: Tensor, ebits: int, mbits: int) -> Tensor:
     #
     # branch 2: to conversion to denormal as well as rounding up to normal
     #
+<<<<<<< HEAD
     # WA CI failed
     denorm_mask_float = denorm_mask_float.to(x.device)
+=======
+>>>>>>> 34b2f81 ([OneDNN] add mxfp8, mxfp4 onednn gemm  (#20))
     denormal_x = x + denorm_mask_float
     denormal_x = denormal_x.view(torch.int32)
     denormal_x -= denorm_mask_int
