@@ -2,15 +2,16 @@
 #include "utils.h"
 #include "fused_moe_prologue.hpp"
 
-typedef at::BFloat16 bfloat16;
-
-void fused_moe_prologue(
+template <typename TA, typename TB>
+void fused_moe_prologue_impl(
     torch::Tensor input,
+    const c10::optional<torch::Tensor>& input_scales,
     torch::Tensor token_selected_experts,
     torch::Tensor token_final_scales,
     torch::Tensor workspace,
     int64_t hidden_size,
     int64_t inter_size,
+    int64_t block_k,
     int64_t ep_rank,
     int64_t ep_size,
     int64_t num_experts_on_rank) {
@@ -25,8 +26,14 @@ void fused_moe_prologue(
   assert(token_selected_experts.dtype() == torch::kInt64);
   auto const* token_selected_experts_ =
       reinterpret_cast<int64_t const*>(token_selected_experts.data_ptr());
-  auto const* input_activations =
-      reinterpret_cast<bfloat16 const*>(input.data_ptr());
+  auto const* input_activations = reinterpret_cast<TA const*>(input.data_ptr());
+
+  TB const* input_activation_scales;
+  if constexpr (!std::is_same_v<TB, NoScale>) {
+    input_activation_scales =
+        reinterpret_cast<TB const*>(input_scales->data_ptr());
+  }
+
   auto const* token_topk_unpermuted_scales =
       reinterpret_cast<float const*>(token_final_scales.data_ptr());
   int const num_experts_per_node = num_experts_total / ep_size;
@@ -39,8 +46,11 @@ void fused_moe_prologue(
   size_t num_moe_inputs = experts_per_token * num_rows;
   size_t const permuted_elems = num_moe_inputs * hidden_size;
   size_t const interbuf_elems = num_moe_inputs * inter_size;
+  size_t const permuted_act_scales_elems =
+      num_moe_inputs * hidden_size / block_k;
 
-  constexpr float dtype_size = 2.0f;
+  constexpr int dtype_size = sizeof(TA);
+  constexpr int act_scales_dtype_size = sizeof(TB);
 
   size_t const permuted_row_to_unpermuted_row_size =
       num_moe_inputs * sizeof(int);
@@ -59,6 +69,13 @@ void fused_moe_prologue(
   size_t const blocked_row_to_unpermuted_row_size =
       num_experts_per_node * num_rows * sizeof(int);
   size_t const permuted_data_size = permuted_elems * dtype_size;
+  size_t permuted_act_scales_size;
+  if constexpr (std::is_same_v<TB, NoScale>) {
+    permuted_act_scales_size = 0;
+  } else {
+    permuted_act_scales_size =
+        permuted_act_scales_elems * act_scales_dtype_size;
+  }
   size_t const permuted_token_final_scales_size =
       num_moe_inputs * sizeof(float);
 
@@ -82,6 +99,7 @@ void fused_moe_prologue(
   ADD(expert_first_token_offset);
   ADD(permuted_token_final_scales);
   ADD_NAME(overlapped_gemm1_gemm2_inputs, permuted_data_size);
+  ADD_NAME(permuted_act_scales, permuted_act_scales_size);
 
   auto getWsPtr = [&](auto type, std::string const& name) {
     return ws_map.at(name).first ? reinterpret_cast<decltype(type)*>(
@@ -101,7 +119,13 @@ void fused_moe_prologue(
       getWsPtr(int{}, "blocked_expert_counts_cumsum");
   auto blocked_row_to_unpermuted_row_ =
       getWsPtr(int{}, "blocked_row_to_unpermuted_row");
-  auto permuted_data_ = getWsPtr(bfloat16{}, "overlapped_gemm1_gemm2_inputs");
+  auto permuted_data_ = getWsPtr(TA{}, "overlapped_gemm1_gemm2_inputs");
+  TB* permuted_act_scales_;
+  if constexpr (std::is_same_v<TB, NoScale>) {
+    permuted_act_scales_ = nullptr;
+  } else {
+    permuted_act_scales_ = getWsPtr(TB{}, "permuted_act_scales");
+  }
   auto permuted_token_final_scales_ =
       getWsPtr(float{}, "permuted_token_final_scales");
   bool use_per_expert_act_scale = false;
@@ -122,10 +146,14 @@ void fused_moe_prologue(
       start_expert,
       stream);
 
-  bfloat16* gemm1_input_expand = reinterpret_cast<bfloat16*>(permuted_data_);
+  TA* input_expand = reinterpret_cast<TA*>(permuted_data_);
+  TB* input_scales_expand = reinterpret_cast<TB*>(permuted_act_scales_);
   expandInputRowsKernelLauncher(
       input_activations,
-      gemm1_input_expand,
+      input_expand,
+      input_activation_scales,
+      input_scales_expand,
+      block_k,
       token_topk_unpermuted_scales,
       permuted_token_final_scales_,
       permuted_row_to_unpermuted_row_,
@@ -137,5 +165,52 @@ void fused_moe_prologue(
       expert_first_token_offset_,
       nullptr,
       stream);
-  auto const* gemm1_input = gemm1_input_expand;
+}
+
+void fused_moe_prologue(
+    torch::Tensor input,
+    const c10::optional<torch::Tensor>& input_scales,
+    torch::Tensor token_selected_experts,
+    torch::Tensor token_final_scales,
+    torch::Tensor workspace,
+    int64_t hidden_size,
+    int64_t inter_size,
+    int64_t block_k,
+    int64_t ep_rank,
+    int64_t ep_size,
+    int64_t num_experts_on_rank) {
+  auto input_type = input.dtype();
+
+  auto call_impl = [&](auto data_type, auto scale_type) {
+    using TA = decltype(data_type);
+    using TS = decltype(scale_type);
+    fused_moe_prologue_impl<TA, TS>(
+        input,
+        input_scales,
+        token_selected_experts,
+        token_final_scales,
+        workspace,
+        hidden_size,
+        inter_size,
+        block_k,
+        ep_rank,
+        ep_size,
+        num_experts_on_rank);
+  };
+
+  if (input_type == at::kBFloat16) {
+    call_impl(at::BFloat16{}, NoScale{});
+  } else if (input_type == at::kHalf) {
+    call_impl(at::Half{}, NoScale{});
+  } else if (input_type == at::kFloat8_e4m3fn) {
+    if (input_scales->dtype() == at::kFloat) {
+      call_impl(at::Float8_e4m3fn{}, float{});
+    } else if (input_scales->dtype() == at::kFloat8_e8m0fnu) {
+      call_impl(at::Float8_e4m3fn{}, at::Float8_e8m0fnu{});
+    }
+  } else if (
+      input_type == at::kFloat4_e2m1fn_x2 &&
+      input_scales->dtype() == at::kFloat8_e8m0fnu) {
+    call_impl(at::Float4_e2m1fn_x2{}, at::Float8_e8m0fnu{});
+  }
 }

@@ -6,6 +6,8 @@
 constexpr static int EXPAND_THREADS_PER_BLOCK = 256;
 typedef at::BFloat16 bfloat16;
 
+struct NoScale {};
+
 template <typename T>
 inline T ceilDiv(T a, T b) {
   return (a + b - 1) / b;
@@ -552,14 +554,20 @@ void threeStepBuildExpertMapsSortFirstToken(
       stream);
 }
 
-template <class InputActivationsType, class ExpandedActivationsType>
+template <
+    class InputActivationsType,
+    class ExpandedActivationsType,
+    class ActivationsScaleType>
 class ExpandInputRowsKernel {
  public:
   ExpandInputRowsKernel(
       InputActivationsType const* unpermuted_input,
-      ExpandedActivationsType* permuted_output,
-      float const* unpermuted_scales,
-      float* permuted_scales,
+      ExpandedActivationsType* permuted_input,
+      ActivationsScaleType const* unpermuted_input_scales,
+      ActivationsScaleType* permuted_input_scales,
+      int block_k,
+      float const* unpermuted_token_scales,
+      float* permuted_token_scales,
       int const* permuted_row_to_unpermuted_row,
       int64_t num_tokens,
       int64_t hidden_size,
@@ -569,9 +577,12 @@ class ExpandInputRowsKernel {
       int64_t num_experts_per_node,
       InputActivationsType const* prequant_scales = nullptr)
       : unpermuted_input(unpermuted_input),
-        permuted_output(permuted_output),
-        unpermuted_scales(unpermuted_scales),
-        permuted_scales(permuted_scales),
+        permuted_input(permuted_input),
+        unpermuted_input_scales(unpermuted_input_scales),
+        permuted_input_scales(permuted_input_scales),
+        block_k(block_k),
+        unpermuted_token_scales(unpermuted_token_scales),
+        permuted_token_scales(permuted_token_scales),
         permuted_row_to_unpermuted_row(permuted_row_to_unpermuted_row),
         num_tokens(num_tokens),
         hidden_size(hidden_size),
@@ -597,8 +608,7 @@ class ExpandInputRowsKernel {
       int64_t const source_row = unpermuted_row % num_tokens;
 
       auto const* source_row_ptr = unpermuted_input + source_row * hidden_size;
-      // Cast first to handle when this is FP4
-      auto* dest_row_ptr = permuted_output + permuted_row * hidden_size;
+      auto* dest_row_ptr = permuted_input + permuted_row * hidden_size;
 
       int64_t const start_offset = item.get_local_id(2);
       int64_t const stride = EXPAND_THREADS_PER_BLOCK;
@@ -608,19 +618,36 @@ class ExpandInputRowsKernel {
            elem_index += stride) {
         dest_row_ptr[elem_index] = source_row_ptr[elem_index];
       }
-      if (permuted_scales && item.get_local_id(2) == 0) {
+
+      if constexpr (!std::is_same_v<ActivationsScaleType, NoScale>) {
+        auto const* source_row_ptr_scale =
+            unpermuted_input_scales + source_row * int(hidden_size / block_k);
+        auto* dest_row_ptr_scale =
+            permuted_input_scales + permuted_row * int(hidden_size / block_k);
+        for (int elem_index = start_offset;
+             elem_index < num_elems_in_col / block_k;
+             elem_index += stride) {
+          dest_row_ptr_scale[elem_index] = source_row_ptr_scale[elem_index];
+        }
+      }
+
+      if (permuted_token_scales && item.get_local_id(2) == 0) {
         int64_t const source_k_idx = source_row * k + source_k_rank;
-        permuted_scales[permuted_row] =
-            unpermuted_scales ? unpermuted_scales[source_k_idx] : 1.0f;
+        permuted_token_scales[permuted_row] =
+            unpermuted_token_scales ? unpermuted_token_scales[source_k_idx]
+                                    : 1.0f;
       }
     }
   }
 
  private:
   InputActivationsType const* unpermuted_input;
-  ExpandedActivationsType* permuted_output;
-  float const* unpermuted_scales;
-  float* permuted_scales;
+  ExpandedActivationsType* permuted_input;
+  ActivationsScaleType const* unpermuted_input_scales;
+  ActivationsScaleType* permuted_input_scales;
+  int block_k;
+  float const* unpermuted_token_scales;
+  float* permuted_token_scales;
   int const* permuted_row_to_unpermuted_row;
   const int64_t num_tokens;
   const int64_t hidden_size;
@@ -631,12 +658,18 @@ class ExpandInputRowsKernel {
   InputActivationsType const* prequant_scales;
 };
 
-template <class InputActivationsType, class ExpandedActivationsType>
+template <
+    class InputActivationsType,
+    class ExpandedActivationsType,
+    class ActivationsScaleType>
 void expandInputRowsKernelLauncher(
     InputActivationsType const* unpermuted_input,
-    ExpandedActivationsType* permuted_output,
-    float const* unpermuted_scales,
-    float* permuted_scales,
+    ExpandedActivationsType* permuted_input,
+    ActivationsScaleType const* unpermuted_input_scales,
+    ActivationsScaleType* permuted_input_scales,
+    int block_k,
+    float const* unpermuted_token_scales,
+    float* permuted_token_scales,
     int const* permuted_row_to_unpermuted_row,
     int64_t const num_rows,
     int64_t const hidden_size,
@@ -655,11 +688,17 @@ void expandInputRowsKernelLauncher(
   stream.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<3>(grid * block, block),
-        ExpandInputRowsKernel<bfloat16, bfloat16>(
+        ExpandInputRowsKernel<
+            InputActivationsType,
+            ExpandedActivationsType,
+            ActivationsScaleType>(
             unpermuted_input,
-            permuted_output,
-            unpermuted_scales,
-            permuted_scales,
+            permuted_input,
+            unpermuted_input_scales,
+            permuted_input_scales,
+            block_k,
+            unpermuted_token_scales,
+            permuted_token_scales,
             permuted_row_to_unpermuted_row,
             num_rows,
             hidden_size,
