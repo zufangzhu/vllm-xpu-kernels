@@ -63,23 +63,19 @@ struct min_scaling_factor {
 template <typename OutT, typename InT, Fp8KVCacheDataType kv_dt>
 struct CopyWithScaleOp {
   float scale;
-  static constexpr float FP8_E4M3_MAX = 448.0f;
-  static constexpr float FP8_E5M2_MAX = 57344.0f;
-
   inline void operator()(OutT& dst, const InT src) const {
     if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
       dst = static_cast<OutT>(src);
     } else {
+      using out_dtype = std::conditional_t<
+          kv_dt == Fp8KVCacheDataType::kFp8E5M2,
+          at::Float8_e5m2,
+          at::Float8_e4m3fn>;
+      float fp8_max = quant_type_max_v<out_dtype>;
       float x = (float)src / scale;
-      if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
-        x = sycl::fmax(-FP8_E4M3_MAX, sycl::fmin(x, FP8_E4M3_MAX));
-        auto fp8_val = static_cast<at::Float8_e4m3fn>(x);
-        dst = sycl::bit_cast<OutT>(fp8_val);
-      } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
-        x = sycl::fmax(-FP8_E5M2_MAX, sycl::fmin(x, FP8_E5M2_MAX));
-        auto fp8_val = static_cast<at::Float8_e5m2>(x);
-        dst = sycl::bit_cast<OutT>(fp8_val);
-      }
+      x = sycl::fmax(-fp8_max, sycl::fmin(x, fp8_max));
+      auto fp8_val = static_cast<out_dtype>(x);
+      dst = sycl::bit_cast<OutT>(fp8_val);
     }
   }
 };
