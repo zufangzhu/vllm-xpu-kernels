@@ -89,9 +89,7 @@ struct ConvertWithScaleOp {
     float x = is_scale_inverted ? (src * scale) : (src / scale);
     const float fp8_max = static_cast<float>(quant_type_max_v<fp8_type>);
     float r = sycl::fmax(-fp8_max, sycl::fmin(x, fp8_max));
-    auto fp8_val = static_cast<fp8_type>(r);
-    // TODO: change uint8_t to sycl fp8 dtype when it is supported
-    dst = sycl::bit_cast<uint8_t>(fp8_val);
+    dst = static_cast<fp8_type>(r);
   }
 };
 
