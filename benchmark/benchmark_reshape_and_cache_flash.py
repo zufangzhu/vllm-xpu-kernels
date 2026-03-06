@@ -52,9 +52,8 @@ def reshape_and_cache_flash_ipex(
     assert kv_cache_dtype == "auto", \
         "IPEX reshape_and_cache_flash uses 'auto' mode"
 
-    ipex.llm.modules.PagedAttention.reshape_and_cache(key, value, key_cache,
-                                                      value_cache,
-                                                      slot_mapping)
+    ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
+        key, value, key_cache, value_cache, slot_mapping)
 
 
 def calculate_diff(
