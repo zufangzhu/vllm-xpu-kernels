@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import itertools
 import random
+import time
 from typing import Optional
 
 import torch
-import triton
+from tabulate import tabulate
 from torch import Tensor
 
 from tests import register_ops as vllm_ops
@@ -126,93 +127,79 @@ def calculate_diff(
         print("⚠️  IPEX not available, skipping correctness check")
 
 
-def get_benchmark(
+@torch.inference_mode()
+def run_benchmark(
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
     dtype: torch.dtype,
-    kv_cache_dtype: str = "auto",
+    kv_cache_dtype: str,
+    num_iters: int,
     device: str = "xpu",
-):
+) -> dict:
+    """Return latencies (seconds) for vLLM and IPEX implementations."""
 
-    @triton.testing.perf_report(
-        triton.testing.Benchmark(
-            x_names=[
-                "num_tokens", "num_heads", "head_size", "block_size",
-                "num_blocks"
-            ],
-            x_vals=configs,
-            line_arg="provider",
-            line_vals=["vllm", "ipex"] if HAS_IPEX else ["vllm"],
-            line_names=["vLLM", "IPEX"] if HAS_IPEX else ["vLLM"],
-            styles=[("blue", "-"),
-                    ("red", "-")] if HAS_IPEX else [("blue", "-")],
-            ylabel="latency (us)",
-            plot_name="reshape_and_cache_flash-benchmark",
-            args={},
-        ))
-    @torch.inference_mode()
-    def benchmark(num_tokens, num_heads, head_size, block_size, num_blocks,
-                  provider):
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        raise ValueError(
+            "fp8 kv-cache requires head_size to be a multiple of 16.")
 
-        if kv_cache_dtype == "fp8" and head_size % 16:
-            raise ValueError(
-                "fp8 kv-cache requires head_size to be a multiple of 16.")
+    seed = 42
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.set_default_device(device)
 
-        torch.manual_seed(42)
-        torch.set_default_device(device)
+    key = torch.randn(num_tokens, num_heads, head_size, dtype=dtype,
+                      device=device)
+    value = torch.randn_like(key)
 
-        key = torch.randn(num_tokens, num_heads, head_size, dtype=dtype,
-                          device=device)
-        value = torch.randn_like(key)
+    num_slots = block_size * num_blocks
+    if num_tokens > num_slots:
+        raise ValueError(
+            "num_tokens cannot exceed the total number of cache slots")
+    slot_mapping_lst = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long,
+                                device=device)
 
-        num_slots = block_size * num_blocks
-        if num_tokens > num_slots:
-            raise ValueError(
-                "num_tokens cannot exceed the total number of cache slots")
-        slot_mapping_lst = random.sample(range(num_slots), num_tokens)
-        slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long,
-                                    device=device)
+    num_layers = 1
+    key_caches, value_caches = create_kv_caches_with_random_flash(
+        num_blocks, block_size, num_layers, num_heads, head_size,
+        kv_cache_dtype, dtype, device=device)
+    key_cache, value_cache = key_caches[0], value_caches[0]
 
-        num_layers = 1
-        key_caches, value_caches = create_kv_caches_with_random_flash(
-            num_blocks, block_size, num_layers, num_heads, head_size,
-            kv_cache_dtype, dtype, device=device)
-        key_cache, value_cache = key_caches[0], value_caches[0]
+    k_scale = (key.amax() / 64.0).to(torch.float32)
+    v_scale = (value.amax() / 64.0).to(torch.float32)
 
-        k_scale = (key.amax() / 64.0).to(torch.float32)
-        v_scale = (value.amax() / 64.0).to(torch.float32)
-
+    def time_fn(fn, n_iters: int) -> float:
         torch.xpu.synchronize()
-        # Warm up
-        for _ in range(5):
-            if provider == "vllm":
-                reshape_and_cache_flash_vllm(key, value, key_cache,
-                                             value_cache, slot_mapping,
-                                             kv_cache_dtype, k_scale, v_scale)
-            elif provider == "ipex" and HAS_IPEX:
-                reshape_and_cache_flash_ipex(key, value, key_cache,
-                                             value_cache, slot_mapping,
-                                             kv_cache_dtype, k_scale, v_scale)
+        start = time.perf_counter()
+        for _ in range(n_iters):
+            fn(key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
+               k_scale, v_scale)
+        torch.xpu.synchronize()
+        return (time.perf_counter() - start) / n_iters
 
-        # Benchmark
-        quantiles = [0.5, 0.2, 0.8]
-        ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: {
-                "vllm": reshape_and_cache_flash_vllm,
-                "ipex": reshape_and_cache_flash_ipex,
-            }[provider](
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping,
-                kv_cache_dtype,
-                k_scale,
-                v_scale,
-            ),
-            quantiles=quantiles,
-        )
-        return 1000 * ms, 1000 * max_ms, 1000 * min_ms
+    results = {}
 
-    return benchmark
+    # vLLM benchmark
+    time_fn(reshape_and_cache_flash_vllm, 3)  # warm up
+    results["vllm"] = time_fn(reshape_and_cache_flash_vllm, num_iters)
+
+    # IPEX benchmark
+    if HAS_IPEX and kv_cache_dtype == "auto":
+        try:
+            time_fn(reshape_and_cache_flash_ipex, 3)  # warm up
+            results["ipex"] = time_fn(reshape_and_cache_flash_ipex, num_iters)
+        except Exception as e:
+            print(f"⚠️  IPEX benchmark failed for config ({num_tokens}, "
+                  f"{num_heads}, {head_size}, {block_size}, {num_blocks}): "
+                  f"{e}")
+
+    del key, value, key_cache, value_cache, slot_mapping
+    torch.xpu.empty_cache()
+
+    return results
 
 
 if __name__ == "__main__":
@@ -255,9 +242,34 @@ if __name__ == "__main__":
         device=device,
     )
 
-    benchmark = get_benchmark(
-        dtype=args.dtype,
-        kv_cache_dtype=args.kv_cache_dtype,
-        device=device,
-    )
-    benchmark.run(print_data=True, save_path=None)
+    headers = [
+        "num_tokens", "num_heads", "head_size", "block_size", "num_blocks",
+        "dtype", "kv_cache_dtype", "vllm (us)"
+    ]
+    if HAS_IPEX:
+        headers.append("ipex (us)")
+
+    rows = []
+    for num_tokens, num_heads, head_size, block_size, num_blocks in configs:
+        results = run_benchmark(
+            num_tokens=num_tokens,
+            num_heads=num_heads,
+            head_size=head_size,
+            block_size=block_size,
+            num_blocks=num_blocks,
+            dtype=args.dtype,
+            kv_cache_dtype=args.kv_cache_dtype,
+            num_iters=100,
+            device=device,
+        )
+        row = [
+            num_tokens, num_heads, head_size, block_size, num_blocks,
+            str(args.dtype), args.kv_cache_dtype,
+            f"{results['vllm'] * 1e6:.3f}",
+        ]
+        if HAS_IPEX:
+            row.append(f"{results['ipex'] * 1e6:.3f}"
+                       if "ipex" in results else "N/A")
+        rows.append(row)
+
+    print(tabulate(rows, headers=headers))
