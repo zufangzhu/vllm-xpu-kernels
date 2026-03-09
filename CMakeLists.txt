@@ -181,14 +181,14 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   )
 
   # AOT devices can be overridden via environment variables:
-  #   VLLM_XPU_AOT_DEVICES and VLLM_XPU_XE2_AOT_DEVICES
-  # Example:
-  #   export VLLM_XPU_AOT_DEVICES="pvc,bmg-g21-a0"
-  #   export VLLM_XPU_XE2_AOT_DEVICES="pvc,bmg-g31-a0"
+  # VLLM_XPU_AOT_DEVICES and VLLM_XPU_XE2_AOT_DEVICES Example: export
+  # VLLM_XPU_AOT_DEVICES="pvc,bmg-g21-a0" export
+  # VLLM_XPU_XE2_AOT_DEVICES="pvc,bmg-g31-a0"
   set(AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
   set(XE2_AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
 
-  if(DEFINED ENV{VLLM_XPU_AOT_DEVICES} AND NOT "$ENV{VLLM_XPU_AOT_DEVICES}" STREQUAL "")
+  if(DEFINED ENV{VLLM_XPU_AOT_DEVICES} AND NOT "$ENV{VLLM_XPU_AOT_DEVICES}"
+                                           STREQUAL "")
     set(AOT_DEVICES "$ENV{VLLM_XPU_AOT_DEVICES}")
   endif()
   if(DEFINED ENV{VLLM_XPU_XE2_AOT_DEVICES}
