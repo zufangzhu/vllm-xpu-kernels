@@ -180,9 +180,21 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
       "-Xspirv-translator;-spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate"
   )
 
-  # TODO: make AOT configurable
-  set(AOT_DEVICES "pvc,bmg-g21-a0,bmg-g31-a0")
-  set(XE2_AOT_DEVICES "pvc,bmg-g21-a0,bmg-g31-a0")
+  # AOT devices can be overridden via environment variables:
+  #   VLLM_XPU_AOT_DEVICES and VLLM_XPU_XE2_AOT_DEVICES
+  # Example:
+  #   export VLLM_XPU_AOT_DEVICES="pvc,bmg-g21-a0"
+  #   export VLLM_XPU_XE2_AOT_DEVICES="pvc,bmg-g31-a0"
+  set(AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
+  set(XE2_AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
+
+  if(DEFINED ENV{VLLM_XPU_AOT_DEVICES} AND NOT "$ENV{VLLM_XPU_AOT_DEVICES}" STREQUAL "")
+    set(AOT_DEVICES "$ENV{VLLM_XPU_AOT_DEVICES}")
+  endif()
+  if(DEFINED ENV{VLLM_XPU_XE2_AOT_DEVICES}
+     AND NOT "$ENV{VLLM_XPU_XE2_AOT_DEVICES}" STREQUAL "")
+    set(XE2_AOT_DEVICES "$ENV{VLLM_XPU_XE2_AOT_DEVICES}")
+  endif()
 
   # Final link option be like: icpx -fsycl -fsycl-target=spir64_gen
   # ${SYCL_DEVICE_LINK_FLAGS} -Xsycl-target-backend=spir64_gen
@@ -190,7 +202,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(FINAL_LINK_OPTIONS "")
   list(APPEND FINAL_LINK_OPTIONS ${SYCL_DEVICE_LINK_FLAGS})
   list(APPEND FINAL_LINK_OPTIONS -Xsycl-target-backend=spir64_gen
-       "-device ${AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+       "-device ${AOT_DEVICES} ")
 
   set(VLLM_GPU_LINK_FLAGS ${FINAL_LINK_OPTIONS})
 
