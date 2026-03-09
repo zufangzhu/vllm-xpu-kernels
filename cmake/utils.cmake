@@ -599,8 +599,12 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   set(XE2_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
   if(XE2_AOT_DEVICES)
     list(
-      APPEND XE2_GPU_LINK_FLAGS -fsycl-targets=spir64_gen -Xsycl-target-backend=spir64_gen
-      "-device ${XE2_AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+      APPEND
+      XE2_GPU_LINK_FLAGS
+      -fsycl-targets=spir64_gen
+      -Xsycl-target-backend=spir64_gen
+      "-device ${XE2_AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread"
+    )
   endif()
   target_link_options(${LIBRARY_NAME} PRIVATE ${XE2_GPU_LINK_FLAGS})
 endfunction()
@@ -663,9 +667,11 @@ function(add_xe_default_kernel_library LIBRARY_NAME)
   # Set link options for default devices (AOT_DEVICES instead of
   # XE2_AOT_DEVICES)
   set(XE_DEFAULT_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
-  if (AOT_DEVICES)
-    list(APPEND XE_DEFAULT_GPU_LINK_FLAGS -fsycl-targets=spir64_gen -Xsycl-target-backend=spir64_gen
-        "-device ${AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+  if(AOT_DEVICES)
+    list(
+      APPEND XE_DEFAULT_GPU_LINK_FLAGS -fsycl-targets=spir64_gen
+      -Xsycl-target-backend=spir64_gen
+      "-device ${AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
   endif()
   target_link_options(${LIBRARY_NAME} PRIVATE ${XE_DEFAULT_GPU_LINK_FLAGS})
 endfunction()

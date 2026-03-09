@@ -201,8 +201,8 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(FINAL_LINK_OPTIONS "")
   list(APPEND FINAL_LINK_OPTIONS ${SYCL_DEVICE_LINK_FLAGS})
   if(AOT_DEVICES)
-    list(APPEND FINAL_LINK_OPTIONS -fsycl-targets=spir64_gen -Xsycl-target-backend=spir64_gen
-    "-device ${AOT_DEVICES}")
+    list(APPEND FINAL_LINK_OPTIONS -fsycl-targets=spir64_gen
+         -Xsycl-target-backend=spir64_gen "-device ${AOT_DEVICES}")
   endif()
 
   set(VLLM_GPU_LINK_FLAGS ${FINAL_LINK_OPTIONS})
