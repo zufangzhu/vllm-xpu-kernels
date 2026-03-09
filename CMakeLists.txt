@@ -158,7 +158,6 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
 
   set(SYCL_COMPILE_FLAGS ${SYCL_FLAGS})
 
-  set(SYCL_TARGETS_OPTION -fsycl-targets=spir64_gen)
   set(SYCL_KERNEL_OPTIONS ${SYCL_KERNEL_OPTIONS} ${SYCL_TARGETS_OPTION})
   set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} ${SYCL_KERNEL_OPTIONS})
 
@@ -187,13 +186,13 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
   set(XE2_AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
 
-  if(DEFINED ENV{VLLM_XPU_AOT_DEVICES} AND NOT "$ENV{VLLM_XPU_AOT_DEVICES}"
-                                           STREQUAL "")
-    set(AOT_DEVICES "$ENV{VLLM_XPU_AOT_DEVICES}")
+  # Allow overriding via env, including explicitly disabling AOT by setting an
+  # empty env var (e.g. export VLLM_XPU_AOT_DEVICES="").
+  if(DEFINED ENV{VLLM_XPU_AOT_DEVICES})
+    set(AOT_DEVICES $ENV{VLLM_XPU_AOT_DEVICES})
   endif()
-  if(DEFINED ENV{VLLM_XPU_XE2_AOT_DEVICES}
-     AND NOT "$ENV{VLLM_XPU_XE2_AOT_DEVICES}" STREQUAL "")
-    set(XE2_AOT_DEVICES "$ENV{VLLM_XPU_XE2_AOT_DEVICES}")
+  if(DEFINED ENV{VLLM_XPU_XE2_AOT_DEVICES})
+    set(XE2_AOT_DEVICES $ENV{VLLM_XPU_XE2_AOT_DEVICES})
   endif()
 
   # Final link option be like: icpx -fsycl -fsycl-target=spir64_gen
@@ -201,8 +200,10 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # '${SYCL_OFFLINE_COMPILER_FLAGS}' kernel.o -o device-code.o
   set(FINAL_LINK_OPTIONS "")
   list(APPEND FINAL_LINK_OPTIONS ${SYCL_DEVICE_LINK_FLAGS})
-  list(APPEND FINAL_LINK_OPTIONS -Xsycl-target-backend=spir64_gen
-       "-device ${AOT_DEVICES} ")
+  if(AOT_DEVICES)
+    list(APPEND FINAL_LINK_OPTIONS -fsycl-targets=spir64_gen -Xsycl-target-backend=spir64_gen
+    "-device ${AOT_DEVICES}")
+  endif()
 
   set(VLLM_GPU_LINK_FLAGS ${FINAL_LINK_OPTIONS})
 
