@@ -150,35 +150,6 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(SYCL_FIRST_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/csrc/sycl_first.h")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${SYCL_FIRST_HEADER}")
 
-  # ============= COMPILE OPTIONS ==================
-  set(SYCL_FLAGS "")
-  set(SYCL_KERNEL_OPTIONS)
-
-  list(APPEND SYCL_FLAGS "-fsycl")
-
-  set(SYCL_COMPILE_FLAGS ${SYCL_FLAGS})
-
-  set(SYCL_TARGETS_OPTION -fsycl-targets=spir64_gen)
-  set(SYCL_KERNEL_OPTIONS ${SYCL_KERNEL_OPTIONS} ${SYCL_TARGETS_OPTION})
-  set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} ${SYCL_KERNEL_OPTIONS})
-
-  set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} "-O3" "-DNDEBUG")
-  # Final build option be like: icpx -fsycl -fsycl-target=spir64_gen
-  # ${SYCL_KERNEL_OPTIONS} -fsycl-host-compiler=gcc
-  # -fsycl-host-compiler-options='${CMAKE_HOST_FLAGS}' kernel.cpp -o kernel.o
-  set(VLLM_GPU_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS})
-
-  # ============= LINK OPTIONS ==================
-  set(SYCL_LINK_FLAGS "")
-  list(APPEND SYCL_LINK_FLAGS "-fsycl")
-  set(SYCL_DEVICE_LINK_FLAGS ${SYCL_LINK_FLAGS})
-  set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS}
-                             -fsycl-max-parallel-link-jobs=16)
-  set(SYCL_DEVICE_LINK_FLAGS
-      ${SYCL_DEVICE_LINK_FLAGS}
-      "-Xspirv-translator;-spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate"
-  )
-
   # AOT devices can be overridden via environment variables:
   # VLLM_XPU_AOT_DEVICES and VLLM_XPU_XE2_AOT_DEVICES Example: export
   # VLLM_XPU_AOT_DEVICES="pvc,bmg-g21-a0" export
@@ -195,14 +166,44 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
     set(XE2_AOT_DEVICES $ENV{VLLM_XPU_XE2_AOT_DEVICES})
   endif()
 
+  # ============= COMPILE OPTIONS ==================
+  set(SYCL_FLAGS "")
+  set(SYCL_KERNEL_OPTIONS)
+
+  list(APPEND SYCL_FLAGS "-fsycl")
+
+  set(SYCL_COMPILE_FLAGS ${SYCL_FLAGS})
+  set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} "-O3" "-DNDEBUG")
+  if(AOT_DEVICES)
+    set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} -fsycl-targets=spir64_gen)
+  endif()
+  # Final build option be like: icpx -fsycl -fsycl-target=spir64_gen
+  # ${SYCL_KERNEL_OPTIONS} -fsycl-host-compiler=gcc
+  # -fsycl-host-compiler-options='${CMAKE_HOST_FLAGS}' kernel.cpp -o kernel.o
+  set(VLLM_GPU_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS})
+
+  # ============= LINK OPTIONS ==================
+  set(SYCL_LINK_FLAGS "")
+  list(APPEND SYCL_LINK_FLAGS "-fsycl")
+  set(SYCL_DEVICE_LINK_FLAGS ${SYCL_LINK_FLAGS})
+  set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS}
+                             -fsycl-max-parallel-link-jobs=16)
+  set(SYCL_DEVICE_LINK_FLAGS
+      ${SYCL_DEVICE_LINK_FLAGS}
+      "-Xspirv-translator;-spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate"
+  )
+  if(AOT_DEVICES)
+    list(APPEND SYCL_DEVICE_LINK_FLAGS -fsycl-targets=spir64_gen
+         -Xsycl-target-backend=spir64_gen)
+  endif()
+
   # Final link option be like: icpx -fsycl -fsycl-target=spir64_gen
   # ${SYCL_DEVICE_LINK_FLAGS} -Xsycl-target-backend=spir64_gen
   # '${SYCL_OFFLINE_COMPILER_FLAGS}' kernel.o -o device-code.o
   set(FINAL_LINK_OPTIONS "")
   list(APPEND FINAL_LINK_OPTIONS ${SYCL_DEVICE_LINK_FLAGS})
   if(AOT_DEVICES)
-    list(APPEND FINAL_LINK_OPTIONS -fsycl-targets=spir64_gen
-         -Xsycl-target-backend=spir64_gen "-device ${AOT_DEVICES}")
+    list(APPEND FINAL_LINK_OPTIONS "-device ${AOT_DEVICES}")
   endif()
 
   set(VLLM_GPU_LINK_FLAGS ${FINAL_LINK_OPTIONS})
