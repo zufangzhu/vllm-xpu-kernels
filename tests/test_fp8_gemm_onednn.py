@@ -224,6 +224,7 @@ def test_fp8_gemm_w8a16_per_channel(fp8_dtype, dtype, is_nt, is_mbk, batch,
 
     torch.testing.assert_close(output_fp8, output_ref, atol=5e-2, rtol=5e-2)
 
+
 def _convert_to_mxfp8_with_hp_ref(t):
     # Convert a tensor to mxfp8, returning:
     #   t_hp : reconstructed bf16 version of t_lp
