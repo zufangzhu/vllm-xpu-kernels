@@ -111,7 +111,7 @@ torch::Tensor fp4_gemm(
   auto b_st = B.scalar_type();
   TORCH_CHECK(
       is_supported_fp4(a_st) && is_supported_fp4(b_st) && a_st == b_st,
-      "input and weight must be f4_e2m1x2 or f4_e2m1x2 for fp4 matmul");
+      "input and weight must both be Float4_e2m1fn_x2 and have matching dtypes for fp4 matmul");
   TORCH_CHECK(
       result.scalar_type() == torch::kFloat16 ||
           result.scalar_type() == torch::kBFloat16,
