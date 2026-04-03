@@ -1075,7 +1075,9 @@ static inline primitive_ext& matmul_primitive_create_and_cache(
           scale_group_size,
           zp_group_size);
     default:
-      throw std::runtime_error("Only support int4 and fp8 gemm ...");
+      throw std::runtime_error(
+          "Unsupported joint_dtypes_t for GEMM. Only int4 (including MXFP4) "
+          "and fp8 joint_dtypes_t combinations are supported in this matmul path.");
   }
 }
 
