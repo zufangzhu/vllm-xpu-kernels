@@ -138,6 +138,8 @@ void swigluoai_and_mul(
     double alpha = 1.702,
     double limit = 7.0);
 
+void relu2_no_mul(torch::Tensor& out, torch::Tensor& input);
+
 void swiglustep_and_mul(
     torch::Tensor& out, torch::Tensor& input, double limit = 7.0);
 
