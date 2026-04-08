@@ -246,8 +246,9 @@ def xpu_fused_moe(hidden_states,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)
 
+    inter_size_scale = 2 if activation == "relu2_no_mul" else 1
     # act
-    act_output = torch.empty((num_moe_inputs, inter_size),
+    act_output = torch.empty((num_moe_inputs, inter_size * inter_size_scale),
                              dtype=gemm1_output.dtype,
                              device=gemm1_output.device)
     if activation == "silu":
@@ -256,6 +257,8 @@ def xpu_fused_moe(hidden_states,
         torch.ops._C.gelu_and_mul(act_output, gemm1_output)
     elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
         torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
+    elif activation == "relu2_no_mul":
+        torch.ops._C.relu2_no_mul(act_output, gemm1_output)
     elif activation == "swiglustep":
         torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
     else:
@@ -276,7 +279,7 @@ def xpu_fused_moe(hidden_states,
         ptr_D=gemm2_output,
         expert_first_token_offset=expert_first_token_offset,
         N=hidden_size,
-        K=inter_size,
+        K=inter_size * inter_size_scale,
         num_experts=num_experts,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)

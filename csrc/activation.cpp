@@ -37,6 +37,14 @@ inline T gelu_quick_kernel(const T& x) {
 }
 
 template <typename T>
+inline T relu2_no_mul_kernel(const T& x) {
+  // square(relu(x))
+  const float f = (float)x;
+  const float r = f > 0.0f ? f : 0.0f;
+  return (T)(r * r);
+}
+
+template <typename T>
 inline T gelu_kernel(const T& x) {
   // Equivalent to PyTorch GELU with 'none' approximation.
   // Refer to:
@@ -437,6 +445,15 @@ void gelu_quick(
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_quick", [&] {
     LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel);
+  });
+}
+
+void relu2_no_mul(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input)  // [..., d]
+{
+  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "relu2_no_mul", [&] {
+    LAUNCH_ACTIVATION_KERNEL(vllm::relu2_no_mul_kernel);
   });
 }
 
