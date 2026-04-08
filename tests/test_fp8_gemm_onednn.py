@@ -241,7 +241,7 @@ def _convert_to_mxfp8_with_hp_ref(t):
     return t_hp, t_lp, t_scale
 
 
-@pytest.mark.parametrize("mnk_factors", MNK_FACTORS[1:])
+@pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("out_dtype", OUT_DTYPES)
 def test_mxfp8_gemm(mnk_factors, out_dtype):
     m, n, k = mnk_factors
