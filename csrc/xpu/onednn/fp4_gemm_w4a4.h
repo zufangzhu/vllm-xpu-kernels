@@ -9,7 +9,7 @@
 
 namespace oneDNN {
 
-static inline void dnnl_matmul_w8a8_fp8(
+static inline void dnnl_matmul_w4a4_fp4(
     torch::Tensor& result,      // dst, [b, m, n]
     const torch::Tensor& mat1,  // src, [b, m, k]
     const torch::Tensor& mat2,  // quantized weight, [k, n] transpose
@@ -23,23 +23,25 @@ static inline void dnnl_matmul_w8a8_fp8(
   const int m = std::reduce(
       src_sz.begin(), src_sz.end() - 1, 1, std::multiplies<int64_t>());
   const int n = o_sz.back();  // presume channel last format
-  const int k = *(src_sz.end() - 1);
+  const int k = (*(src_sz.end() - 1)) * 2;
 
   // get joint dtypes
   joint_dtypes_t jd;
-  auto in_dtype = mat1.scalar_type();
-  auto wei_dtype = mat2.scalar_type();
   auto out_dtype = result.scalar_type();
-
-  if (in_dtype == at::ScalarType::Float8_e5m2) {
-    jd = out_dtype == at::ScalarType::BFloat16 ? joint_dtypes_t::f8_e5m2_bf16
-                                               : joint_dtypes_t::f8_e5m2_f16;
-  } else if (in_dtype == at::ScalarType::Float8_e4m3fn) {
-    jd = out_dtype == at::ScalarType::BFloat16 ? joint_dtypes_t::f8_e4m3_bf16
-                                               : joint_dtypes_t::f8_e4m3_f16;
+  auto m1_sc_dtype = m1_sc.scalar_type();
+  auto m2_sc_dtype = m2_sc.scalar_type();
+  if (m1_sc_dtype == at::ScalarType::Float8_e8m0fnu) {
+    TORCH_CHECK(
+        m2_sc_dtype == at::ScalarType::Float8_e8m0fnu,
+        "Mismatched scale data types in mxfp4 matmul: ",
+        m1_sc_dtype,
+        " vs ",
+        m2_sc_dtype);
+    jd = out_dtype == at::ScalarType::BFloat16 ? joint_dtypes_t::mxfp4_bf16
+                                               : joint_dtypes_t::mxfp4_f16;
   } else {
     TORCH_INTERNAL_ASSERT(
-        false, "Unsupported data type for fp8 matmul: ", in_dtype);
+        false, "Unsupported scale type for fp4 matmul: ", m1_sc_dtype);
   }
 
   // get bias type
@@ -60,26 +62,18 @@ static inline void dnnl_matmul_w8a8_fp8(
     leading_dim = mat1_strides[0] < mat1_strides[1] ? 0 : 1;
   } else {
     TORCH_CHECK(
-        false, "Unsupported input dimension for fp8 matmul: ", mat1.dim());
+        false, "Unsupported input dimension for fp4 matmul: ", mat1.dim());
   }
-  int64_t lda = mat1_strides[leading_dim];
+  int64_t lda = 2 * mat1_strides[leading_dim];
   int64_t ldb = mat2.strides()[mat2.dim() - 1] == 1
                     ? mat2.strides()[mat2.dim() - 2]
-                    : mat2.strides()[mat2.dim() - 1];
+                    : 2 * (mat2.strides()[mat2.dim() - 1]);
   int64_t ldc = result.strides()[leading_dim];
 
-  auto m1_sc_dtype = m1_sc.scalar_type();
-  auto m2_sc_dtype = m2_sc.scalar_type();
   auto f_attr = [&](dnnl::primitive_attr& pattr) {
     pattr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
 
     if (m1_sc_dtype == at::ScalarType::Float8_e8m0fnu) {
-      TORCH_CHECK(
-          m2_sc_dtype == at::ScalarType::Float8_e8m0fnu,
-          "Mismatched scale data types in mxfp8 matmul: ",
-          m1_sc_dtype,
-          " vs ",
-          m2_sc_dtype);
       pattr.set_scales(
           DNNL_ARG_SRC,
           /* mask */ (1 << 0) + (1 << 1),
@@ -168,7 +162,7 @@ static inline void dnnl_matmul_w8a8_fp8(
   arg_handles.emplace_back(DNNL_ARG_SCRATCHPAD, scratchpad_tensor.data_ptr());
 
   auto& strm = GpuStreamManager::Instance().get_stream();
-  auto qfp8_matmul_event =
+  auto qfp4_matmul_event =
       matmul_ext.execute(strm, engine, std::move(arg_handles), arg_off);
 }
 }  // namespace oneDNN
