@@ -106,6 +106,9 @@ class batched_moe_align_block_size_kernel {
         0,
         sycl::plus<int>{});
     cumsum_val = temp_storage[local_id_x];
+    if (batch_id == 0) {
+      cumsum_val = 0;
+    }
 
     bool const is_last_batch = batch_id == (num_batches - 1);
     if (is_last_batch) {
@@ -238,6 +241,9 @@ void _moe_align_block_size(
       0,
       sycl::plus<int>{});
   cumsum_val = temp_storage[local_id_x];
+  if (local_id_x == 0) {
+    cumsum_val = 0;
+  }
 
   if (expert_id <= num_experts) {
     cumsum[cumsum_offset + expert_id] = cumsum_val;
