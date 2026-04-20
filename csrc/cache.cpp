@@ -192,10 +192,10 @@ class reshape_and_cache_flash_kernel {
 
         float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto)
                                 ? 0.f
-                                : k_scale[head * kv_scale_stride_];
+                                : k_scale_[head * kv_scale_stride_];
         float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto)
                                 ? 0.f
-                                : v_scale[head * kv_scale_stride_];
+                                : v_scale_[head * kv_scale_stride_];
 
         fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
         fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
@@ -850,7 +850,12 @@ void reshape_and_cache_flash(
   int kv_scale_stride = (k_scale.numel() > 1) ? 1 : 0;
 
   sycl::range<1> grid(num_tokens);
-  sycl::range<1> block(std::min(num_heads * head_size, 1024));
+  // The kernel's non-contiguous path uses warp-style logic that assumes the
+  // local size is a multiple of 32.
+  const int n = num_heads * head_size;
+  int block_threads = std::min(((n + 31) / 32) * 32, 1024);
+  block_threads = std::max(block_threads, 32);
+  sycl::range<1> block(block_threads);
   const at::DeviceGuard device_guard(key.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
