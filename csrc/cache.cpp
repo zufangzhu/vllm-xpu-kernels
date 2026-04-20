@@ -165,7 +165,7 @@ class reshape_and_cache_flash_kernel {
         value_cache_ + block_idx * block_stride_ + block_offset * page_stride_;
 
     const bool is_contiguous_heads = (head_stride_ == head_size_);
-    constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
+    // constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
 
     if (is_contiguous_heads && kv_scale_stride_ == 0) {
       float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale_;
@@ -173,15 +173,15 @@ class reshape_and_cache_flash_kernel {
 
       fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
       fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
-      fp8::scaled_convert_vec<VEC_SIZE>(key_src, key_dst, n, local_idx, local_range, k_op);
-      fp8::scaled_convert_vec<VEC_SIZE>(
+      fp8::scaled_convert_vec(key_src, key_dst, n, local_idx, local_range, k_op);
+      fp8::scaled_convert_vec(
           value_src, value_dst, n, local_idx, local_range, v_op);
     } else {
       const int lane = local_idx & 31;
       const int warp_id = local_idx >> 5;
       const int warps_per_block = local_range >> 5;
 
-      for (int head = warp_id; head < num_heads; head += warps_per_block) {
+      for (int head = warp_id; head < num_heads_; head += warps_per_block) {
         const scalar_t* __restrict__ k_src_h = key_src + head * head_size_;
         const scalar_t* __restrict__ v_src_h = value_src + head * head_size_;
 
@@ -199,10 +199,8 @@ class reshape_and_cache_flash_kernel {
 
         fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
         fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
-        fp8::scaled_convert_vec<VEC_SIZE>(k_src_h, k_dst_h, head_size_, lane, 32,
-                                          k_op);
-        fp8::scaled_convert_vec<VEC_SIZE>(v_src_h, v_dst_h, head_size_, lane, 32,
-                                          v_op);
+        fp8::scaled_convert_vec(k_src_h, k_dst_h, head_size_, lane, 32, k_op);
+        fp8::scaled_convert_vec(v_src_h, v_dst_h, head_size_, lane, 32, v_op);
       }
     }
   }
