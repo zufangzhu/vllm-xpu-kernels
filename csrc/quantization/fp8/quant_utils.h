@@ -15,20 +15,6 @@ enum class Fp8KVCacheDataType {
 
 namespace fp8 {
 
-template <typename dtype_t>
-struct alignas(4) dtypex4_t {
-  static_assert(
-      std::is_same_v<dtype_t, float> || std::is_same_v<dtype_t, at::Half> ||
-          std::is_same_v<dtype_t, at::BFloat16> ||
-          std::is_same_v<dtype_t, uint8_t> ||
-          std::is_same_v<dtype_t, at::Float8_e4m3fn> ||
-          std::is_same_v<dtype_t, at::Float8_e5m2>,
-      "Unsupported cache type for dtypex4_t");
-  dtype_t x;
-  dtype_t y;
-  dtype_t z;
-  dtype_t w;
-};
 
 template <
     typename T,
