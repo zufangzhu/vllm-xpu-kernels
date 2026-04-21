@@ -15,7 +15,6 @@ enum class Fp8KVCacheDataType {
 
 namespace fp8 {
 
-
 template <
     typename T,
     typename = std::enable_if_t<
