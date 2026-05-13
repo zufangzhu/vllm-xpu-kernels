@@ -23,8 +23,8 @@ def _is_env_enabled(env_name: str, default: str = "0") -> bool:
     return value in ("1", "ON", "TRUE", "YES", "Y")
 
 
-def _should_use_ref_fused_moe(is_mxfp8: bool) -> bool:
-    if is_mxfp8:
+def _should_use_ref_fused_moe(is_mxfp8: bool, is_block_fp8: bool) -> bool:
+    if is_mxfp8 and is_block_fp8:
         return True
     return _is_env_enabled(REF_FUSED_MOE_ENV)
 
@@ -182,10 +182,16 @@ def ref_fused_moe(recipe,
     token_idxs = idxs // num_per_tok
 
     if recipe == "fp8block":
-        _q, _scale = quant_fp8_act(x)
-        x = hp_from_1x128(_q, _scale)
-    elif recipe == "mxfp8":
         w13 = w13.transpose(1, 2).contiguous()
+        w2 = w2.transpose(1, 2).contiguous()
+        _q, _scale = quant_fp8_act(x.to(torch.float32))
+        x = hp_from_1x128(_q, _scale)
+        print(f"w13_scales dtype: {w13_scales.dtype}")
+        print(f"w2_scales dtype: {w2_scales.dtype}")
+        # w13_scales = w13_scales.view(torch.float32)
+        # w2_scales = w2_scales.view(torch.float32)
+    elif recipe == "mxfp8":
+        w13 = w13.transpose(1, 2).contiguous()  # -> [expert, 2 * inter, hidden]
         w2 = w2.transpose(1, 2).contiguous()
         act_ori_shape = x.shape
         w13_ori_shape = w13.shape
@@ -230,8 +236,10 @@ def ref_fused_moe(recipe,
         if recipe == "fp8block":
             expert_w13 = hp_from_128x128(w13[expert_id, :, :],
                                          w13_scales[expert_id, :, :])
-        ###
+            # print(f"expert_w13 shape: {expert_w13.shape}, w13 shape: {w13.shape}")
 
+
+        # [inter, hidden] 
         w1, w3 = torch.split(expert_w13,
                              int(list(expert_w13.shape)[0] / 2),
                              dim=0)
@@ -251,9 +259,9 @@ def ref_fused_moe(recipe,
         expert_w2 = w2[expert_id, :, :]
         if recipe == "fp8block":
             expert_w2 = hp_from_128x128(w2[expert_id, :, :],
-                                        w2_scales[expert_id, :, :])
-            _q, _scale = quant_fp8_act(gemm2_input)
-            gemm2_input = hp_from_1x128(_q, _scale)
+                                        w2_scales[expert_id, :, :]).to(activation_dtype)
+            _q, _scale = quant_fp8_act(gemm2_input.to(torch.float32))
+            gemm2_input = hp_from_1x128(_q, _scale).to(activation_dtype)
         elif recipe == "mxfp8":
             _q, _scale = quant_mxfp_act(gemm2_input, "mxfp8")
             gemm2_input = (
@@ -352,7 +360,7 @@ class XpuFusedMoe:
         self.is_block_fp8 = is_block_fp8
         self.recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
                                    is_block_fp8)
-        self._use_ref = _should_use_ref_fused_moe(is_mxfp8)
+        self._use_ref = _should_use_ref_fused_moe(is_mxfp8, is_block_fp8)
 
         if self.activation == "silu":
             self.act_func = torch.ops._C.silu_and_mul
@@ -562,9 +570,10 @@ def xpu_fused_moe(hidden_states,
     else:
         assert output.shape == hidden_states.shape, \
             "output shape must be the same as hidden_states shape"
-    if _should_use_ref_fused_moe(is_mxfp8):
+    if _should_use_ref_fused_moe(is_mxfp8, is_block_fp8):
         recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
                              is_block_fp8)
+        # print(f"zzzzzzzzzzzFused MoE recipe: {recipe}")
         out = ref_fused_moe(recipe=recipe,
                             x=hidden_states,
                             w13=w13,

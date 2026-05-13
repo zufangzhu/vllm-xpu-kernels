@@ -486,10 +486,16 @@ def reorder_mxfp_scales(A_scales, expert_first_token_offset):
 
 
 def hp_from_128x128(x_lp, x_scale):
+
     orig_shape = x_lp.shape
+    # Handle small shapes like 1D
+    if len(orig_shape) == 1 or orig_shape[0] < 128 or orig_shape[1] < 128:
+        x_hp = x_lp.to(torch.float32) * x_scale.to(torch.float32)
+        return x_hp.to(torch.float32)
+    
     M, K = orig_shape
     x_lp = x_lp.view(M // 128, 128, K // 128, 128)
-    x_scale = x_scale.unsqueeze(1).unsqueeze(-1)
+    x_scale = x_scale.view(M // 128, 1, K // 128, 1)
     x_hp = x_lp.to(torch.float32)
     x_hp = x_hp * x_scale
     return x_hp.reshape(orig_shape).to(torch.float32)
