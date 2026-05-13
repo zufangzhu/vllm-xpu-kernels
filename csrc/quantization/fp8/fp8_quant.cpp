@@ -250,7 +250,7 @@ class per_token_group_quant_8bit_kernel {
 
     const float inverted_scale = 1.0f / (y_s);
     constexpr int VEC_SIZE = 4;
-    if (!can_vectorize) {
+    if (can_vectorize) {
       fp8::ConvertWithScaleOp<true, fp8_type> op{inverted_scale};
       vectorize_with_alignment<VEC_SIZE>(
           group_input,
