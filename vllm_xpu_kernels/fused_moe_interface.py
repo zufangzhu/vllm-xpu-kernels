@@ -261,7 +261,7 @@ def ref_fused_moe(recipe,
                                         w2_scales[expert_id, :, :])
             gemm2_input_f = gemm2_input.to(torch.float32)
             _q, _scale = quant_fp8_act(gemm2_input_f)
-            gemm2_input = hp_from_1x128(_q, _scale)
+            gemm2_input = hp_from_1x128(_q, _scale).to(activation_dtype)
         elif recipe == "mxfp8":
             _q, _scale = quant_mxfp_act(gemm2_input, "mxfp8")
             gemm2_input = (
@@ -276,7 +276,7 @@ def ref_fused_moe(recipe,
                                               (_q.shape[-1] * 2, ))
         ###
 
-        expert_out = ((gemm2_input.to(activation_dtype)) @ expert_w2.T.to(activation_dtype))
+        expert_out = (gemm2_input) @ expert_w2.T.to(activation_dtype)
 
         if w2_bias is not None:
             expert_out += w2_bias[expert_id, :].to(activation_dtype)
