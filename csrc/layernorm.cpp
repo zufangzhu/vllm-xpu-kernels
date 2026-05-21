@@ -4,17 +4,11 @@
 #include <ATen/DeviceGuard.h>
 #include "utils.h"
 #include "dispatch_utils.h"
+#include "quantization/utils.h"
 
 namespace vllm {
 
-template <typename scalar_t>
-struct alignas(8) vec4_t {
-  scalar_t val[4];
-};
-
-// The vector width is fixed at 4 to avoid excessive branching in the kernel,
-// which could degrade performance.
-template <typename scalar_t, int NUM_DIMS, int VEC_SIZE = 4>
+template <typename scalar_t, int NUM_DIMS, int VEC_SIZE>
 class rms_norm_kernel {
  public:
   rms_norm_kernel(
@@ -69,9 +63,9 @@ class rms_norm_kernel {
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
 
-    auto vec_op = [&variance](
-                      const vec4_t<scalar_t>& vec, int vec_size = VEC_SIZE) {
-      for (int i = 0; i < vec_size; ++i) {
+    auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
+#pragma unroll
+      for (int i = 0; i < VEC_SIZE; ++i) {
         float x = static_cast<float>(vec.val[i]);
         variance += x * x;
       }
@@ -89,10 +83,11 @@ class rms_norm_kernel {
         ((addr_in & (WIDTH - 1)) == 0) && ((hidden_size & (VEC_SIZE - 1)) == 0);
     if (can_vec) {
       int64_t const num_vec_elems = hidden_size / VEC_SIZE;
-      auto const* vec_in = reinterpret_cast<const vec4_t<scalar_t>*>(input_row);
+      auto const* vec_in =
+          reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
       for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
            i += item_ct1.get_local_range(2)) {
-        vec4_t<scalar_t> tmp = vec_in[i];
+        vec_n_t<scalar_t, VEC_SIZE> tmp = vec_in[i];
         vec_op(tmp);
       }
     } else {
@@ -109,11 +104,11 @@ class rms_norm_kernel {
       }
 
       int64_t const num_vec_elems = (hidden_size - prefix_elems) / VEC_SIZE;
-      auto const* vec_in =
-          reinterpret_cast<const vec4_t<scalar_t>*>(input_row + prefix_elems);
+      auto const* vec_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(
+          input_row + prefix_elems);
       for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
            i += item_ct1.get_local_range(2)) {
-        vec4_t<scalar_t> tmp = vec_in[i];
+        vec_n_t<scalar_t, VEC_SIZE> tmp = vec_in[i];
         vec_op(tmp);
       }
 
@@ -143,16 +138,18 @@ class rms_norm_kernel {
                        ((addr_out & (WIDTH - 1)) == 0) &&
                        ((hidden_size & (VEC_SIZE - 1)) == 0);
     if (can_vec_out) {
-      auto* v_in = reinterpret_cast<const vec4_t<scalar_t>*>(input_row);
-      auto* v_w = reinterpret_cast<const vec4_t<scalar_t>*>(weight);
-      auto* v_out = reinterpret_cast<vec4_t<scalar_t>*>(out_row);
+      auto* v_in =
+          reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
+      auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+      auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
       int64_t const out_num_vec_elems = hidden_size / VEC_SIZE;
       float s_variance_val = *s_variance_ptr;
       for (int idx = item_ct1.get_local_id(2); idx < out_num_vec_elems;
            idx += item_ct1.get_local_range(2)) {
-        vec4_t<scalar_t> dst;
-        vec4_t<scalar_t> src1 = v_in[idx];
-        vec4_t<scalar_t> src2 = v_w[idx];
+        vec_n_t<scalar_t, VEC_SIZE> dst;
+        vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
+        vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
+#pragma unroll
         for (int j = 0; j < VEC_SIZE; j++) {
           float x = static_cast<float>(src1.val[j]);
           dst.val[j] = ((scalar_t)(x * s_variance_val)) * src2.val[j];
@@ -202,8 +199,11 @@ void call_rms_norm_kernel(
   auto out_ptr = out.data_ptr<scalar_t>();
   auto input_ptr = input.data_ptr<scalar_t>();
   auto weight_ptr = weight.data_ptr<scalar_t>();
+
+  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  constexpr int vec_size = (sizeof(scalar_t) == 2) ? 8 : 4;
   sycl::range<3> grid(1, 1, num_tokens);
-  sycl::range<3> block(1, 1, std::min(hidden_size, 1024));
+  sycl::range<3> block(1, 1, std::min(hidden_size / vec_size, max_block_size));
   auto& queue = vllm::xpu::vllmGetQueue();
 
   VLLM_DISPATCH_RANK234(num_dims, [&]() {
@@ -211,7 +211,7 @@ void call_rms_norm_kernel(
       sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          vllm::rms_norm_kernel<sycl_t, tensor_rank>(
+          vllm::rms_norm_kernel<sycl_t, tensor_rank, vec_size>(
               (sycl_t*)out_ptr,
               (const sycl_t*)input_ptr,
               input_stride_d2,
