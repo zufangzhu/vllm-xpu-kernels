@@ -70,54 +70,14 @@ class rms_norm_kernel {
         variance += x * x;
       }
     };
-    auto scalar_op = [&variance](const scalar_t& val) {
-      float x = static_cast<float>(val);
-      variance += x * x;
-    };
 
-    constexpr int WIDTH = VEC_SIZE * sizeof(scalar_t);
-    uintptr_t addr_in = reinterpret_cast<uintptr_t>(input_row);
-
-    // fast path when the whole region is already aligned
-    bool can_vec =
-        ((addr_in & (WIDTH - 1)) == 0) && ((hidden_size & (VEC_SIZE - 1)) == 0);
-    if (can_vec) {
-      int64_t const num_vec_elems = hidden_size / VEC_SIZE;
-      auto const* vec_in =
-          reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
-      for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
-           i += item_ct1.get_local_range(2)) {
-        vec_n_t<scalar_t, VEC_SIZE> tmp = vec_in[i];
-        vec_op(tmp);
-      }
-    } else {
-      int misalignment_offset = addr_in & (WIDTH - 1);
-      int alignment_bytes = WIDTH - misalignment_offset;
-      int prefix_elems = alignment_bytes & (WIDTH - 1);
-      prefix_elems /= sizeof(scalar_t);
-      prefix_elems = prefix_elems < hidden_size ? prefix_elems : hidden_size;
-
-      // 1. handle the possibly unaligned prefix with scalar access.
-      for (int i = item_ct1.get_local_id(2); i < prefix_elems;
-           i += item_ct1.get_local_range(2)) {
-        scalar_op(input_row[i]);
-      }
-
-      int64_t const num_vec_elems = (hidden_size - prefix_elems) / VEC_SIZE;
-      auto const* vec_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(
-          input_row + prefix_elems);
-      for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
-           i += item_ct1.get_local_range(2)) {
-        vec_n_t<scalar_t, VEC_SIZE> tmp = vec_in[i];
-        vec_op(tmp);
-      }
-
-      // 3. handle remaining tail elements.
-      for (int i = item_ct1.get_local_id(2) + num_vec_elems * VEC_SIZE;
-           i < hidden_size - prefix_elems;
-           i += item_ct1.get_local_range(2)) {
-        scalar_op((input_row + prefix_elems)[i]);
-      }
+    int64_t const num_vec_elems = hidden_size / VEC_SIZE;
+    auto const* vec_in =
+        reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
+    for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
+         i += item_ct1.get_local_range(2)) {
+      vec_n_t<scalar_t, VEC_SIZE> tmp = vec_in[i];
+      vec_op(tmp);
     }
 
     variance = sycl::reduce_over_group(
@@ -131,37 +91,123 @@ class rms_norm_kernel {
     item_ct1.barrier(sycl::access::fence_space::local_space);
 
     scalar_t* out_row = out + item_ct1.get_group(2) * hidden_size;
-    uintptr_t addr_weight = reinterpret_cast<uintptr_t>(weight);
-    uintptr_t addr_out = reinterpret_cast<uintptr_t>(out_row);
-    bool can_vec_out = ((addr_in & (WIDTH - 1)) == 0) &&
-                       ((addr_weight & (WIDTH - 1)) == 0) &&
-                       ((addr_out & (WIDTH - 1)) == 0) &&
-                       ((hidden_size & (VEC_SIZE - 1)) == 0);
-    if (can_vec_out) {
-      auto* v_in =
-          reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
-      auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
-      auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
-      int64_t const out_num_vec_elems = hidden_size / VEC_SIZE;
-      float s_variance_val = *s_variance_ptr;
-      for (int idx = item_ct1.get_local_id(2); idx < out_num_vec_elems;
-           idx += item_ct1.get_local_range(2)) {
-        vec_n_t<scalar_t, VEC_SIZE> dst;
-        vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
-        vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
+    auto* v_in =
+        reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
+    auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+    auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
+    int64_t const out_num_vec_elems = hidden_size / VEC_SIZE;
+    float s_variance_val = *s_variance_ptr;
+    for (int idx = item_ct1.get_local_id(2); idx < out_num_vec_elems;
+         idx += item_ct1.get_local_range(2)) {
+      vec_n_t<scalar_t, VEC_SIZE> dst;
+      vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
+      vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
 #pragma unroll
-        for (int j = 0; j < VEC_SIZE; j++) {
-          float x = static_cast<float>(src1.val[j]);
-          dst.val[j] = ((scalar_t)(x * s_variance_val)) * src2.val[j];
-        }
-        v_out[idx] = dst;
+      for (int j = 0; j < VEC_SIZE; j++) {
+        float x = static_cast<float>(src1.val[j]);
+        dst.val[j] = ((scalar_t)(x * s_variance_val)) * src2.val[j];
       }
-    } else {
-      for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
-           idx += item_ct1.get_local_range(2)) {
-        float x = (float)input_row[idx];
-        out_row[idx] = ((scalar_t)(x * (*s_variance_ptr))) * weight[idx];
-      }
+      v_out[idx] = dst;
+    }
+  }
+
+ private:
+  scalar_t* __restrict__ out;          // [..., hidden_size]
+  const scalar_t* __restrict__ input;  // [..., hidden_size]
+  const int64_t input_stride_d2;
+  const int64_t input_stride_d3;
+  const int64_t input_stride_d4;
+  const int64_t input_shape_d2;
+  const int64_t input_shape_d3;
+  const scalar_t* __restrict__ weight;  // [hidden_size]
+  const float epsilon;
+  const int num_tokens;
+  const int hidden_size;
+  sycl::local_accessor<float, 1> s_variance;
+};
+
+template <typename scalar_t, int NUM_DIMS>
+class rms_norm_kernel<scalar_t, NUM_DIMS, 0> {
+ public:
+  rms_norm_kernel(
+      scalar_t* out_,
+      const scalar_t* input_,
+      const int64_t input_stride_d2_,  // input.stride(-2)
+      const int64_t input_stride_d3_,  // input.stride(-3)
+      const int64_t input_stride_d4_,  // input.stride(-4)
+      const int64_t input_shape_d2_,   // input.size(-2)
+      const int64_t input_shape_d3_,   // input.size(-3)
+      const scalar_t* weight_,
+      const float epsilon_,
+      const int num_tokens_,
+      const int hidden_size_,
+      sycl::local_accessor<float, 1> s_variance_)
+      : out(out_),
+        input(input_),
+        input_stride_d2(input_stride_d2_),
+        input_stride_d3(input_stride_d3_),
+        input_stride_d4(input_stride_d4_),
+        input_shape_d2(input_shape_d2_),
+        input_shape_d3(input_shape_d3_),
+        weight(weight_),
+        epsilon(epsilon_),
+        num_tokens(num_tokens_),
+        hidden_size(hidden_size_),
+        s_variance(s_variance_) {}
+
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
+      const sycl::nd_item<3>& item_ct1) const {
+    float* s_variance_ptr =
+        s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
+    float variance = 0.0f;
+
+    const scalar_t* input_row;
+    if constexpr (NUM_DIMS == 2) {
+      // 2D for layernorm normal case [batch_size, hidden]
+      input_row = input + item_ct1.get_group(2) * input_stride_d2;
+    } else if constexpr (NUM_DIMS == 3) {
+      // 3D for q/k norm [batch_size, num_heads, head_size]
+      int batch_idx = item_ct1.get_group(2) / input_shape_d2;
+      int head_idx = item_ct1.get_group(2) % input_shape_d2;
+      input_row =
+          input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
+    } else if constexpr (NUM_DIMS == 4) {
+      // 4D for transformers model_impl qk norm [batch, seq, head, head_dim]
+      int batch_idx = item_ct1.get_group(2) / (input_shape_d3 * input_shape_d2);
+      int remaining = item_ct1.get_group(2) % (input_shape_d3 * input_shape_d2);
+      int seq_idx = remaining / input_shape_d2;
+      int head_idx = remaining % input_shape_d2;
+      input_row = input + batch_idx * input_stride_d4 +
+                  seq_idx * input_stride_d3 + head_idx * input_stride_d2;
+    }
+
+    auto scalar_op = [&variance](const scalar_t& val) {
+      float x = static_cast<float>(val);
+      variance += x * x;
+    };
+
+#pragma unroll
+    for (int i = item_ct1.get_local_id(2); i < hidden_size;
+         i += item_ct1.get_local_range(2)) {
+      scalar_op(input_row[i]);
+    }
+
+    variance = sycl::reduce_over_group(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>(),
+        variance,
+        sycl::plus<>());
+    if (item_ct1.get_local_id(2) == 0) {
+      *s_variance_ptr = sycl::rsqrt(variance / hidden_size + epsilon);
+    }
+
+    item_ct1.barrier(sycl::access::fence_space::local_space);
+
+    scalar_t* out_row = out + item_ct1.get_group(2) * hidden_size;
+#pragma unroll
+    for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
+         idx += item_ct1.get_local_range(2)) {
+      float x = (float)input_row[idx];
+      out_row[idx] = ((scalar_t)(x * (*s_variance_ptr))) * weight[idx];
     }
   }
 
@@ -201,31 +247,78 @@ void call_rms_norm_kernel(
   auto weight_ptr = weight.data_ptr<scalar_t>();
 
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
-  constexpr int vec_size = (sizeof(scalar_t) == 2) ? 8 : 4;
   sycl::range<3> grid(1, 1, num_tokens);
-  sycl::range<3> block(1, 1, std::min(hidden_size / vec_size, max_block_size));
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  VLLM_DISPATCH_RANK234(num_dims, [&]() {
-    queue.submit([&](sycl::handler& cgh) {
-      sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
-      cgh.parallel_for(
-          sycl::nd_range<3>(grid * block, block),
-          vllm::rms_norm_kernel<sycl_t, tensor_rank, vec_size>(
-              (sycl_t*)out_ptr,
-              (const sycl_t*)input_ptr,
-              input_stride_d2,
-              input_stride_d3,
-              input_stride_d4,
-              input_shape_d2,
-              input_shape_d3,
-              (const sycl_t*)weight_ptr,
-              epsilon,
-              num_tokens,
-              hidden_size,
-              s_variance));
+  constexpr int vec_size = (sizeof(scalar_t) == 2) ? 8 : 4;
+  constexpr int req_alignment_bytes = vec_size * sizeof(scalar_t);
+
+  auto inp_addr = reinterpret_cast<std::uintptr_t>(input_ptr);
+  auto out_addr = reinterpret_cast<std::uintptr_t>(out_ptr);
+  auto wt_addr = reinterpret_cast<std::uintptr_t>(weight_ptr);
+
+  // Base pointers must be aligned
+  bool ptrs_aligned = (inp_addr % req_alignment_bytes == 0) &&
+                      (out_addr % req_alignment_bytes == 0) &&
+                      (wt_addr % req_alignment_bytes == 0);
+
+  // hidden_size must be divisible by vec_size (so vectorized loop covers all
+  // elements)
+  bool hidden_divisible = (hidden_size % vec_size == 0);
+
+  // Strides must be divisible by vec_size so that each row starts at an aligned
+  // offset (input_row = input + batch_idx * stride_d3 + head_idx * stride_d2)
+  bool strides_aligned = (input_stride_d2 % vec_size == 0) &&
+                         (input_stride_d3 % vec_size == 0 || num_dims < 3) &&
+                         (input_stride_d4 % vec_size == 0 || num_dims < 4);
+
+  bool can_vec = ptrs_aligned && hidden_divisible && strides_aligned;
+  if (can_vec) {
+    sycl::range<3> block(
+        1, 1, std::min(hidden_size / vec_size, max_block_size));
+    VLLM_DISPATCH_RANK234(num_dims, [&]() {
+      queue.submit([&](sycl::handler& cgh) {
+        sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
+        cgh.parallel_for(
+            sycl::nd_range<3>(grid * block, block),
+            rms_norm_kernel<sycl_t, tensor_rank, vec_size>(
+                (sycl_t*)out_ptr,
+                (const sycl_t*)input_ptr,
+                input_stride_d2,
+                input_stride_d3,
+                input_stride_d4,
+                input_shape_d2,
+                input_shape_d3,
+                (const sycl_t*)weight_ptr,
+                epsilon,
+                num_tokens,
+                hidden_size,
+                s_variance));
+      });
     });
-  });
+  } else {
+    sycl::range<3> block(1, 1, std::min(hidden_size, max_block_size));
+    VLLM_DISPATCH_RANK234(num_dims, [&]() {
+      queue.submit([&](sycl::handler& cgh) {
+        sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
+        cgh.parallel_for(
+            sycl::nd_range<3>(grid * block, block),
+            rms_norm_kernel<sycl_t, tensor_rank, 0>(
+                (sycl_t*)out_ptr,
+                (const sycl_t*)input_ptr,
+                input_stride_d2,
+                input_stride_d3,
+                input_stride_d4,
+                input_shape_d2,
+                input_shape_d3,
+                (const sycl_t*)weight_ptr,
+                epsilon,
+                num_tokens,
+                hidden_size,
+                s_variance));
+      });
+    });
+  }
 }
 
 template <typename scalar_t, int width>
@@ -398,10 +491,8 @@ void call_fused_add_rms_norm_kernel(
   auto weight_ptr = weight.data_ptr<scalar_t>();
   int64_t input_stride = input.stride(-2);
 
-  constexpr int vector_width = 8;
-  constexpr int req_alignment_bytes =
-      vector_width * 2;  // vector_width * sizeof(bfloat16 or float16) (float32
-                         // falls back to non-vectorized version anyway)
+  constexpr int vector_width = (sizeof(scalar_t) == 2) ? 8 : 4;
+  constexpr int req_alignment_bytes = vector_width * sizeof(scalar_t);
   auto inp_ptr = reinterpret_cast<std::uintptr_t>(input_ptr);
   auto res_ptr = reinterpret_cast<std::uintptr_t>(residual_ptr);
   auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight_ptr);
