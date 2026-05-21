@@ -228,8 +228,98 @@ void call_rms_norm_kernel(
   });
 }
 
-template <typename scalar_t>
+template <typename scalar_t, int width>
 class fused_add_rms_norm_kernel {
+ public:
+  fused_add_rms_norm_kernel(
+      scalar_t* __restrict__ input_,     // [..., hidden_size]
+      scalar_t* __restrict__ residual_,  // [..., hidden_size]
+      const int64_t input_stride_,
+      const scalar_t* __restrict__ weight_,  // [hidden_size]
+      const float epsilon_,
+      const int num_tokens_,
+      const int hidden_size_,
+      sycl::local_accessor<float, 1> s_variance_)
+      : input(input_),
+        residual(residual_),
+        input_stride(input_stride_),
+        weight(weight_),
+        epsilon(epsilon_),
+        num_tokens(num_tokens_),
+        hidden_size(hidden_size_),
+        s_variance(s_variance_) {}
+
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
+      const sycl::nd_item<3>& item_ct1) const {
+    static_assert(width > 0, "Use width=0 specialization for scalar path");
+    using vec_t = vec_n_t<scalar_t, width>;
+
+    const int vec_hidden_size = hidden_size / width;
+    const int64_t vec_input_stride = input_stride / width;
+
+    float* s_variance_ptr =
+        s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
+    float variance = 0.0f;
+
+    auto* __restrict__ input_v = reinterpret_cast<vec_t*>(input);
+    auto* __restrict__ residual_v = reinterpret_cast<vec_t*>(residual);
+    auto* __restrict__ weight_v = reinterpret_cast<const vec_t*>(weight);
+
+    for (int idx = item_ct1.get_local_id(2); idx < vec_hidden_size;
+         idx += item_ct1.get_local_range(2)) {
+      int id = item_ct1.get_group(2) * vec_hidden_size + idx;
+      int64_t strided_id = item_ct1.get_group(2) * vec_input_stride + idx;
+      vec_t temp = input_v[strided_id];
+      vec_t res = residual_v[id];
+#pragma unroll
+      for (int i = 0; i < width; i++) {
+        temp.val[i] += res.val[i];
+        float x = static_cast<float>(temp.val[i]);
+        variance += x * x;
+      }
+      residual_v[id] = temp;
+    }
+
+    variance = sycl::reduce_over_group(
+        sycl::ext::oneapi::this_work_item::get_work_group<3>(),
+        variance,
+        sycl::plus<>());
+    if (item_ct1.get_local_id(2) == 0) {
+      *s_variance_ptr = sycl::rsqrt(variance / hidden_size + epsilon);
+    }
+
+    item_ct1.barrier(sycl::access::fence_space::local_space);
+
+    float s_var = *s_variance_ptr;
+    for (int idx = item_ct1.get_local_id(2); idx < vec_hidden_size;
+         idx += item_ct1.get_local_range(2)) {
+      int id = item_ct1.get_group(2) * vec_hidden_size + idx;
+      int64_t strided_id = item_ct1.get_group(2) * vec_input_stride + idx;
+      vec_t res = residual_v[id];
+      vec_t w = weight_v[idx];
+      vec_t out;
+#pragma unroll
+      for (int i = 0; i < width; i++) {
+        float x = static_cast<float>(res.val[i]);
+        out.val[i] = static_cast<scalar_t>(x * s_var) * w.val[i];
+      }
+      input_v[strided_id] = out;
+    }
+  }
+
+ private:
+  scalar_t* __restrict__ input;     // [..., hidden_size]
+  scalar_t* __restrict__ residual;  // [..., hidden_size]
+  const int64_t input_stride;
+  const scalar_t* __restrict__ weight;  // [hidden_size]
+  const float epsilon;
+  const int num_tokens;
+  const int hidden_size;
+  sycl::local_accessor<float, 1> s_variance;  // local memory for variance
+};
+
+template <typename scalar_t>
+class fused_add_rms_norm_kernel<scalar_t, 0> {
  public:
   fused_add_rms_norm_kernel(
       scalar_t* __restrict__ input_,     // [..., hidden_size]
@@ -302,27 +392,63 @@ void call_fused_add_rms_norm_kernel(
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
+  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   auto input_ptr = input.data_ptr<scalar_t>();
   auto residual_ptr = residual.data_ptr<scalar_t>();
   auto weight_ptr = weight.data_ptr<scalar_t>();
   int64_t input_stride = input.stride(-2);
+
+  constexpr int vector_width = 8;
+  constexpr int req_alignment_bytes =
+      vector_width * 2;  // vector_width * sizeof(bfloat16 or float16) (float32
+                         // falls back to non-vectorized version anyway)
+  auto inp_ptr = reinterpret_cast<std::uintptr_t>(input_ptr);
+  auto res_ptr = reinterpret_cast<std::uintptr_t>(residual_ptr);
+  auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight_ptr);
+  bool ptrs_are_aligned = inp_ptr % req_alignment_bytes == 0 &&
+                          res_ptr % req_alignment_bytes == 0 &&
+                          wt_ptr % req_alignment_bytes == 0;
+  bool offsets_are_multiple_of_vector_width =
+      hidden_size % vector_width == 0 && input_stride % vector_width == 0;
+  bool can_vec = ptrs_are_aligned && offsets_are_multiple_of_vector_width;
+
   sycl::range<3> grid(1, 1, num_tokens);
-  sycl::range<3> block(1, 1, std::min(hidden_size, 1024));
   auto& queue = vllm::xpu::vllmGetQueue();
-  queue.submit([&](sycl::handler& cgh) {
-    sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
-    cgh.parallel_for(
-        sycl::nd_range<3>(grid * block, block),
-        fused_add_rms_norm_kernel<sycl_t>(
-            (sycl_t*)input_ptr,
-            (sycl_t*)residual_ptr,
-            input_stride,
-            (const sycl_t*)weight_ptr,
-            epsilon,
-            num_tokens,
-            hidden_size,
-            s_variance));
-  });
+
+  if (can_vec) {
+    sycl::range<3> block(
+        1, 1, std::min(hidden_size / vector_width, max_block_size));
+    queue.submit([&](sycl::handler& cgh) {
+      sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
+      cgh.parallel_for(
+          sycl::nd_range<3>(grid * block, block),
+          fused_add_rms_norm_kernel<sycl_t, vector_width>(
+              (sycl_t*)input_ptr,
+              (sycl_t*)residual_ptr,
+              input_stride,
+              (const sycl_t*)weight_ptr,
+              epsilon,
+              num_tokens,
+              hidden_size,
+              s_variance));
+    });
+  } else {
+    sycl::range<3> block(1, 1, std::min(hidden_size, max_block_size));
+    queue.submit([&](sycl::handler& cgh) {
+      sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
+      cgh.parallel_for(
+          sycl::nd_range<3>(grid * block, block),
+          fused_add_rms_norm_kernel<sycl_t, 0>(
+              (sycl_t*)input_ptr,
+              (sycl_t*)residual_ptr,
+              input_stride,
+              (const sycl_t*)weight_ptr,
+              epsilon,
+              num_tokens,
+              hidden_size,
+              s_variance));
+    });
+  }
 }
 
 }  // namespace vllm
