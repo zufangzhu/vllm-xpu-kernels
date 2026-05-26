@@ -266,11 +266,9 @@ class rms_norm_multi_row_kernel {
     const int col_id = item_ct1.get_local_id(2);
     const int col_range = item_ct1.get_local_range(2);
 
-    // Global row index
-    const int global_row =
-        item_ct1.get_group(2) * ROWS_PER_WG + row_in_wg;
-    if (global_row >= num_tokens)
-      return;
+    // Global row index (guaranteed valid by dispatch: num_tokens % ROWS_PER_WG
+    // == 0)
+    const int global_row = item_ct1.get_group(2) * ROWS_PER_WG + row_in_wg;
 
     // s_variance layout: one float per row in the work-group
     float* s_variance_ptr =
@@ -307,10 +305,10 @@ class rms_norm_multi_row_kernel {
       }
     }
 
-    // Reduce across column work-items for this row using sub-group shuffles.
+    // Reduce across column work-items for this row using sub-group shifts.
     // With linearized local id = row_in_wg * col_range + col_id,
     // sub-groups of 32 may span multiple rows. We reduce within each
-    // row's lanes using shuffle_xor restricted to col_range width.
+    // row's lanes using shift_group_left-based tree reduction.
     auto sg = item_ct1.get_sub_group();
     const int lane = sg.get_local_linear_id();
     const int row_lane_offset = lane % col_range;
@@ -318,14 +316,12 @@ class rms_norm_multi_row_kernel {
     // Tree reduction within col_range consecutive lanes
     for (int offset = col_range / 2; offset > 0; offset >>= 1) {
       float other = sycl::shift_group_left(sg, variance, offset);
-      if (row_lane_offset < offset)
-        variance += other;
+      if (row_lane_offset < offset) variance += other;
     }
 
     // Lane 0 of each row's segment has the final sum
     if (row_lane_offset == 0) {
-      s_variance_ptr[row_in_wg] =
-          sycl::rsqrt(variance / hidden_size + epsilon);
+      s_variance_ptr[row_in_wg] = sycl::rsqrt(variance / hidden_size + epsilon);
     }
 
     item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -412,16 +408,16 @@ void call_rms_norm_kernel(
                          (input_stride_d4 % vec_size == 0 || num_dims < 4);
 
   bool can_vec = ptrs_aligned && hidden_divisible && strides_aligned;
-
   // Multi-row optimization: when hidden_size is small (e.g., head_dim=128),
   // a single row doesn't have enough work to fill a work-group. Pack multiple
   // rows into one work-group to improve occupancy.
   if (can_vec) {
     const int items_per_row = hidden_size / vec_size;  // e.g., 128/8 = 16
-    if (items_per_row <= 32 && num_tokens >= 16) {
+    constexpr int subgroup_size = 32;
+    constexpr int ROWS_PER_WG = 16;
+    if (items_per_row <= subgroup_size && num_tokens % ROWS_PER_WG == 0 &&
+        subgroup_size % items_per_row == 0) {
       // Use multi-row kernel: pack multiple rows per work-group
-      // Choose ROWS_PER_WG so that total WG size is reasonable (256-512)
-      constexpr int ROWS_PER_WG = 16;
       const int num_groups = (num_tokens + ROWS_PER_WG - 1) / ROWS_PER_WG;
       // Work-group: dim0 = ROWS_PER_WG, dim1 = 1, dim2 = items_per_row
       sycl::range<3> block(ROWS_PER_WG, 1, items_per_row);
@@ -432,8 +428,11 @@ void call_rms_norm_kernel(
               sycl::range<1>(ROWS_PER_WG), cgh);
           cgh.parallel_for(
               sycl::nd_range<3>(grid * block, block),
-              rms_norm_multi_row_kernel<sycl_t, tensor_rank, vec_size,
-                                        ROWS_PER_WG>(
+              rms_norm_multi_row_kernel<
+                  sycl_t,
+                  tensor_rank,
+                  vec_size,
+                  ROWS_PER_WG>(
                   (sycl_t*)out_ptr,
                   (const sycl_t*)input_ptr,
                   input_stride_d2,
@@ -680,12 +679,11 @@ void call_fused_add_rms_norm_kernel(
   bool offsets_are_multiple_of_vector_width =
       hidden_size % vector_width == 0 && input_stride % vector_width == 0;
   bool can_vec = ptrs_are_aligned && offsets_are_multiple_of_vector_width;
-  bool use_scalar_for_small_hidden = (hidden_size / vector_width < 32);
 
   sycl::range<3> grid(1, 1, num_tokens);
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  if (can_vec && !use_scalar_for_small_hidden) { 
+  if (can_vec) {
     sycl::range<3> block(
         1, 1, std::min(hidden_size / vector_width, max_block_size));
     queue.submit([&](sycl::handler& cgh) {
