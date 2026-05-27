@@ -226,6 +226,142 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0> {
   sycl::local_accessor<float, 1> s_variance;
 };
 
+// Multi-row kernel: each work-group processes ROWS_PER_WG rows.
+// The work-group is organized as (ROWS_PER_WG, 1, items_per_row).
+// Each "sub-row" uses dimension 0 to index which row it handles,
+// and dimension 2 for the column within that row.
+template <typename scalar_t, int NUM_DIMS, int VEC_SIZE, int ROWS_PER_WG>
+class rms_norm_multi_row_kernel {
+ public:
+  rms_norm_multi_row_kernel(
+      scalar_t* out_,
+      const scalar_t* input_,
+      const int64_t input_stride_d2_,
+      const int64_t input_stride_d3_,
+      const int64_t input_stride_d4_,
+      const int64_t input_shape_d2_,
+      const int64_t input_shape_d3_,
+      const scalar_t* weight_,
+      const float epsilon_,
+      const int num_tokens_,
+      const int hidden_size_,
+      sycl::local_accessor<float, 1> s_variance_)
+      : out(out_),
+        input(input_),
+        input_stride_d2(input_stride_d2_),
+        input_stride_d3(input_stride_d3_),
+        input_stride_d4(input_stride_d4_),
+        input_shape_d2(input_shape_d2_),
+        input_shape_d3(input_shape_d3_),
+        weight(weight_),
+        epsilon(epsilon_),
+        num_tokens(num_tokens_),
+        hidden_size(hidden_size_),
+        s_variance(s_variance_) {}
+
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
+      const sycl::nd_item<3>& item_ct1) const {
+    // dim 0 = row within work-group, dim 2 = column work-item
+    const int row_in_wg = item_ct1.get_local_id(0);
+    const int col_id = item_ct1.get_local_id(2);
+    const int col_range = item_ct1.get_local_range(2);
+
+    // Global row index (guaranteed valid by dispatch: num_tokens % ROWS_PER_WG
+    // == 0)
+    const int global_row = item_ct1.get_group(2) * ROWS_PER_WG + row_in_wg;
+
+    // s_variance layout: one float per row in the work-group
+    float* s_variance_ptr =
+        s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
+
+    const scalar_t* input_row;
+    if constexpr (NUM_DIMS == 2) {
+      input_row = input + global_row * input_stride_d2;
+    } else if constexpr (NUM_DIMS == 3) {
+      int batch_idx = global_row / input_shape_d2;
+      int head_idx = global_row % input_shape_d2;
+      input_row =
+          input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
+    } else if constexpr (NUM_DIMS == 4) {
+      int batch_idx = global_row / (input_shape_d3 * input_shape_d2);
+      int remaining = global_row % (input_shape_d3 * input_shape_d2);
+      int seq_idx = remaining / input_shape_d2;
+      int head_idx = remaining % input_shape_d2;
+      input_row = input + batch_idx * input_stride_d4 +
+                  seq_idx * input_stride_d3 + head_idx * input_stride_d2;
+    }
+
+    float variance = 0.0f;
+    const int64_t num_vec_elems = hidden_size / VEC_SIZE;
+    auto const* vec_in =
+        reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
+
+    for (int i = col_id; i < num_vec_elems; i += col_range) {
+      vec_n_t<scalar_t, VEC_SIZE> tmp = vec_in[i];
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        float x = static_cast<float>(tmp.val[j]);
+        variance += x * x;
+      }
+    }
+
+    // Reduce across column work-items for this row using sub-group shifts.
+    // With linearized local id = row_in_wg * col_range + col_id,
+    // sub-groups of 32 may span multiple rows. We reduce within each
+    // row's lanes using shift_group_left-based tree reduction.
+    auto sg = item_ct1.get_sub_group();
+    const int lane = sg.get_local_linear_id();
+    const int row_lane_offset = lane % col_range;
+
+    // Tree reduction within col_range consecutive lanes
+    for (int offset = col_range / 2; offset > 0; offset >>= 1) {
+      float other = sycl::shift_group_left(sg, variance, offset);
+      if (row_lane_offset < offset) variance += other;
+    }
+
+    // Lane 0 of each row's segment has the final sum
+    if (row_lane_offset == 0) {
+      s_variance_ptr[row_in_wg] = sycl::rsqrt(variance / hidden_size + epsilon);
+    }
+
+    item_ct1.barrier(sycl::access::fence_space::local_space);
+
+    // Phase 2: normalize
+    scalar_t* out_row = out + global_row * hidden_size;
+    auto* v_in =
+        reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
+    auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+    auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
+    float s_var = s_variance_ptr[row_in_wg];
+
+    for (int idx = col_id; idx < num_vec_elems; idx += col_range) {
+      vec_n_t<scalar_t, VEC_SIZE> dst;
+      vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
+      vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; j++) {
+        float x = static_cast<float>(src1.val[j]);
+        dst.val[j] = ((scalar_t)(x * s_var)) * src2.val[j];
+      }
+      v_out[idx] = dst;
+    }
+  }
+
+ private:
+  scalar_t* __restrict__ out;
+  const scalar_t* __restrict__ input;
+  const int64_t input_stride_d2;
+  const int64_t input_stride_d3;
+  const int64_t input_stride_d4;
+  const int64_t input_shape_d2;
+  const int64_t input_shape_d3;
+  const scalar_t* __restrict__ weight;
+  const float epsilon;
+  const int num_tokens;
+  const int hidden_size;
+  sycl::local_accessor<float, 1> s_variance;
+};
+
 template <typename scalar_t>
 void call_rms_norm_kernel(
     torch::Tensor& out,
@@ -247,7 +383,6 @@ void call_rms_norm_kernel(
   auto weight_ptr = weight.data_ptr<scalar_t>();
 
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
-  sycl::range<3> grid(1, 1, num_tokens);
   auto& queue = vllm::xpu::vllmGetQueue();
 
   constexpr int vec_size = (sizeof(scalar_t) == 2) ? 8 : 4;
@@ -273,7 +408,48 @@ void call_rms_norm_kernel(
                          (input_stride_d4 % vec_size == 0 || num_dims < 4);
 
   bool can_vec = ptrs_aligned && hidden_divisible && strides_aligned;
+  // Multi-row optimization: when hidden_size is small (e.g., head_dim=128),
+  // a single row doesn't have enough work to fill a work-group. Pack multiple
+  // rows into one work-group to improve occupancy.
   if (can_vec) {
+    const int items_per_row = hidden_size / vec_size;  // e.g., 128/8 = 16
+    constexpr int subgroup_size = 32;
+    constexpr int ROWS_PER_WG = 16;
+    if (items_per_row <= subgroup_size && num_tokens % ROWS_PER_WG == 0 &&
+        subgroup_size % items_per_row == 0) {
+      // Use multi-row kernel: pack multiple rows per work-group
+      const int num_groups = (num_tokens + ROWS_PER_WG - 1) / ROWS_PER_WG;
+      // Work-group: dim0 = ROWS_PER_WG, dim1 = 1, dim2 = items_per_row
+      sycl::range<3> block(ROWS_PER_WG, 1, items_per_row);
+      sycl::range<3> grid(1, 1, num_groups);
+      VLLM_DISPATCH_RANK234(num_dims, [&]() {
+        queue.submit([&](sycl::handler& cgh) {
+          sycl::local_accessor<float, 1> s_variance(
+              sycl::range<1>(ROWS_PER_WG), cgh);
+          cgh.parallel_for(
+              sycl::nd_range<3>(grid * block, block),
+              rms_norm_multi_row_kernel<
+                  sycl_t,
+                  tensor_rank,
+                  vec_size,
+                  ROWS_PER_WG>(
+                  (sycl_t*)out_ptr,
+                  (const sycl_t*)input_ptr,
+                  input_stride_d2,
+                  input_stride_d3,
+                  input_stride_d4,
+                  input_shape_d2,
+                  input_shape_d3,
+                  (const sycl_t*)weight_ptr,
+                  epsilon,
+                  num_tokens,
+                  hidden_size,
+                  s_variance));
+        });
+      });
+      return;
+    }
+    sycl::range<3> grid(1, 1, num_tokens);
     sycl::range<3> block(
         1, 1, std::min(hidden_size / vec_size, max_block_size));
     VLLM_DISPATCH_RANK234(num_dims, [&]() {
@@ -297,6 +473,7 @@ void call_rms_norm_kernel(
       });
     });
   } else {
+    sycl::range<3> grid(1, 1, num_tokens);
     sycl::range<3> block(1, 1, std::min(hidden_size, max_block_size));
     VLLM_DISPATCH_RANK234(num_dims, [&]() {
       queue.submit([&](sycl::handler& cgh) {
