@@ -101,7 +101,7 @@ jobs:
 
       - name: print wheel size
         run: |
-          ls -lh dist/*.whl
+          find dist -name '*.whl' -exec ls -lh {} +
 
       - name: report wheel size
         run: |
