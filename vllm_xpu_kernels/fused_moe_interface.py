@@ -12,9 +12,9 @@ try:
 except ImportError as e:
     FUSEDMOE_UNAVAILABLE_REASON = str(e)
     FUSEDMOE_AVAILABLE = False
-import time
-from ._mx_utils import (dequant_mxfp4, dequant_mxfp8, dequant_fp8_block_act, dequant_fp8_block_wei,
-                        qdq_fp8_act, quant_fp8_block_act, quant_mxfp_act_xpu)
+from ._mx_utils import (dequant_fp8_block_act, dequant_fp8_block_wei,
+                        dequant_mxfp4, dequant_mxfp8, quant_fp8_block_act,
+                        quant_mxfp_act_xpu)
 
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
 
@@ -24,21 +24,17 @@ def _is_env_enabled(env_name: str, default: str = "0") -> bool:
     return value in ("1", "ON", "TRUE", "YES", "Y")
 
 
-def _should_use_ref_fused_moe(is_mxfp8: bool,
-                              is_mxfp4_fp8: bool = False) -> bool:
-    if is_mxfp8 or is_mxfp4_fp8:
+def _should_use_ref_fused_moe(is_mxfp8: bool) -> bool:
+    if is_mxfp8:
         return True
     return _is_env_enabled(REF_FUSED_MOE_ENV)
 
 
-def _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8,
-                is_mxfp4_fp8=False):
+def _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8):
     if is_mxfp8:
         return "mxfp8"
     elif is_block_fp8:
         return "fp8block"
-    elif is_mxfp4_fp8:
-        return "mxfp4_fp8"
     elif is_mxfp4:
         return "mxfp4"
     elif is_int4:
@@ -191,17 +187,6 @@ def ref_fused_moe(recipe,
     tokens_per_expert = counts.cumsum()
     token_idxs = idxs // num_per_tok
 
-    # activation quant and dequant
-    # t_actquant = 0
-    # t_weiquant = 0
-    # t_gemm1 = 0
-    # t_activation = 0
-    # t_gemm2_quant = 0
-    # t_gemm2 = 0
-    # t_index_add = 0
-    
-    # torch.xpu.synchronize()
-    # t0 = time.perf_counter()
     if recipe == "fp8block":
         _q, _scale = quant_fp8_block_act(x)
         x = dequant_fp8_block_act(_q, _scale)
@@ -211,11 +196,6 @@ def ref_fused_moe(recipe,
     elif recipe == "mxfp4":
         _q, _scale = quant_mxfp_act_xpu(x, "mxfp4")
         x = dequant_mxfp4(_q, _scale)
-    elif recipe == "mxfp4_fp8":
-        # activations: per-tensor fp8 quant-dequant
-        x = qdq_fp8_act(x)
-    # torch.xpu.synchronize()
-    # t_actquant += time.perf_counter() - t0
 
     for expert_id, end_idx in enumerate(tokens_per_expert):
         start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
@@ -227,29 +207,22 @@ def ref_fused_moe(recipe,
         expert_tokens = x[exp_token_idxs].to(compute_dtype)
 
         ### dequant weight13 and weight2
-        # torch.xpu.synchronize()
-        # t1 = time.perf_counter()
-        if recipe in ("mxfp4", "mxfp4_fp8"):
+        if recipe in ("mxfp4"):
             expert_w13 = dequant_mxfp4(w13[expert_id], w13_scales[expert_id])
-            w13_ori_shape = w13[expert_id].shape
-            expert_w13 = expert_w13.reshape(w13_ori_shape[:-1] + (w13_ori_shape[-1] * 2, ))
-            w2_ori_shape = w2[expert_id].shape
             expert_w2 = dequant_mxfp4(w2[expert_id], w2_scales[expert_id])
-            expert_w2 = expert_w2.reshape(w2_ori_shape[:-1] + (w2_ori_shape[-1] * 2, ))
         elif recipe == "fp8block":
             expert_w13 = dequant_fp8_block_wei(w13[expert_id, :, :],
                                          w13_scales[expert_id, :, :])
             expert_w2 = dequant_fp8_block_wei(w2[expert_id, :, :],
                                         w2_scales[expert_id, :, :])
         elif recipe == "mxfp8":
-            expert_w13_scales  = w13_scales[expert_id].view(torch.float8_e8m0fnu).to(dequant_dtype)
-            expert_w13 = w13[expert_id].to(dequant_dtype) * expert_w13_scales.repeat_interleave(32, dim=1)
-            expert_w2_scales  = w2_scales[expert_id].view(torch.float8_e8m0fnu).to(dequant_dtype)
-            expert_w2 = w2[expert_id].to(dequant_dtype) * expert_w2_scales.repeat_interleave(32, dim=1)
+            expert_w13 = dequant_mxfp8(w13[expert_id], w13_scales[expert_id])
+            expert_w2 = dequant_mxfp8(w2[expert_id], w2_scales[expert_id])
         else:
             # bf16 / fp16
             expert_w13 = w13[expert_id]
             expert_w2 = w2[expert_id]
+
         ### split w13 to w1 and w3
         if recipe in ("fp8block", "mxfp8"):
             inter = expert_w13.shape[-1] // 2
@@ -258,11 +231,7 @@ def ref_fused_moe(recipe,
             w1, w3 = torch.split(expert_w13,
                                 expert_w13.shape[0] // 2,
                                 dim=0)
-        # torch.xpu.synchronize()
-        # t_weiquant += time.perf_counter() - t1
 
-        # torch.xpu.synchronize()
-        # t2 = time.perf_counter()
         if w13_bias is not None:
             w1_bias, w3_bias = w13_bias[expert_id, :].chunk(2)
 
@@ -273,11 +242,6 @@ def ref_fused_moe(recipe,
         if w13_bias is not None:
             gemm1 += w1_bias.to(compute_dtype)
 
-        # torch.xpu.synchronize()
-        # t_gemm1 += time.perf_counter() - t2
-
-        # torch.xpu.synchronize()
-        # t3 = time.perf_counter()
         if recipe in ("fp8block", "mxfp8"):
             up = expert_tokens @ w3.to(compute_dtype)
         else:
@@ -290,12 +254,8 @@ def ref_fused_moe(recipe,
             up.clamp_(min=-gemm1_clamp_limit, max=gemm1_clamp_limit)
 
         gate = _naive_fused_moe_activation(gemm1, activation)
-        # torch.xpu.synchronize()
-        # t_activation += time.perf_counter() - t3
 
         ### quant act for gemm2 and dequant weight 2
-        # torch.xpu.synchronize()
-        # t4 = time.perf_counter()
         gemm2_input = gate * up
         if recipe == "fp8block":
             _q, _scale = quant_fp8_block_act(gemm2_input)
@@ -306,14 +266,7 @@ def ref_fused_moe(recipe,
         elif recipe == "mxfp4":
             _q, _scale = quant_mxfp_act_xpu(gemm2_input, "mxfp4")
             gemm2_input = dequant_mxfp4(_q, _scale)
-        elif recipe in ("mxfp4_fp8"):
-            gemm2_input = qdq_fp8_act(gemm2_input)
-        # torch.xpu.synchronize()
-        # t_gemm2_quant += time.perf_counter() - t4
 
-        ###
-        # torch.xpu.synchronize()
-        # t5 = time.perf_counter()
         gemm2_input = gemm2_input.to(compute_dtype)
         if recipe in ("fp8block", "mxfp8"):
             expert_out = gemm2_input @ expert_w2.to(compute_dtype)
@@ -322,23 +275,10 @@ def ref_fused_moe(recipe,
 
         if w2_bias is not None:
             expert_out += w2_bias[expert_id, :].to(compute_dtype)
-        # torch.xpu.synchronize()
-        # t_gemm2 += time.perf_counter() - t5
 
-        # torch.xpu.synchronize()
-        # t6 = time.perf_counter()
         expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
         expert_cache.index_add_(0, exp_token_idxs, expert_out)
-        # torch.xpu.synchronize()
-        # t_index_add += time.perf_counter() - t6
 
-    # print(f"act_quant      {t_actquant:.3f}s")
-    # print(f"weight_dequant {t_weiquant:.3f}s")
-    # print(f"gemm1          {t_gemm1:.3f}s")
-    # print(f"activation     {t_activation:.3f}s")
-    # print(f"gemm2_quant    {t_gemm2_quant:.3f}s")
-    # print(f"gemm2          {t_gemm2:.3f}s")
-    # print(f"index_add      {t_index_add:.3f}s")
     expert_cache = expert_cache.to(x.dtype)
     return expert_cache
 
@@ -362,12 +302,11 @@ class XpuFusedMoe:
         is_mxfp4=False,
         is_mxfp8=False,
         is_block_fp8=False,
-        is_mxfp4_fp8=False,
         gemm1_clamp_limit: Optional[float]=None,
     ):
         # 4bits support [E, N, K]
         # other types [E, K, N]
-        if not is_int4 and not is_mxfp4 and not is_mxfp4_fp8:
+        if not is_int4 and not is_mxfp4:
             self.inter_size = w13.shape[-1] // 2
         else:
             self.inter_size = w13.shape[-2] // 2
@@ -390,8 +329,7 @@ class XpuFusedMoe:
         self.w13 = w13
         self.w2 = w2
 
-        if not is_fp8 and not is_int4 and not is_mxfp4 and not is_block_fp8 \
-                and not is_mxfp4_fp8:
+        if not is_fp8 and not is_int4 and not is_mxfp4 and not is_block_fp8:
             self.gemm1_scales = None
             self.gemm2_scales = None
         else:
@@ -412,12 +350,10 @@ class XpuFusedMoe:
         self.is_mxfp4 = is_mxfp4
         self.is_mxfp8 = is_mxfp8
         self.is_block_fp8 = is_block_fp8
-        self.is_mxfp4_fp8 = is_mxfp4_fp8
         self.gemm1_clamp_limit = gemm1_clamp_limit
         self.recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
-                                   is_block_fp8, is_mxfp4_fp8)
-        self._use_ref = _should_use_ref_fused_moe(is_mxfp8, is_mxfp4_fp8)
-
+                                   is_block_fp8)
+        self._use_ref = _should_use_ref_fused_moe(is_mxfp8)
         if self.activation == "silu":
             self.act_func = torch.ops._C.silu_and_mul
         elif self.activation == "gelu":
@@ -607,7 +543,6 @@ def xpu_fused_moe(hidden_states,
                   is_mxfp4=False,
                   is_mxfp8=False,
                   is_block_fp8=False,
-                  is_mxfp4_fp8=False,
                   gemm1_clamp_limit: Optional[float]=None):
     '''
     hidden_states: [num_rows, hidden_size]
@@ -632,16 +567,15 @@ def xpu_fused_moe(hidden_states,
     is_mxfp4: bool
     is_mxfp8: bool
     is_block_fp8: bool
-    is_mxfp4_fp8: bool
     '''
     if output is None:
         output = torch.empty_like(hidden_states)
     else:
         assert output.shape == hidden_states.shape, \
             "output shape must be the same as hidden_states shape"
-    if _should_use_ref_fused_moe(is_mxfp8, is_mxfp4_fp8):
+    if _should_use_ref_fused_moe(is_mxfp8):
         recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
-                             is_block_fp8, is_mxfp4_fp8)
+                             is_block_fp8)
         out = ref_fused_moe(recipe=recipe,
                             x=hidden_states,
                             w13=w13,
@@ -663,7 +597,7 @@ def xpu_fused_moe(hidden_states,
 
     # 4bits support [E, N, K]
     # other types [E, K, N]
-    if not is_int4 and not is_mxfp4 and not is_mxfp4_fp8:
+    if not is_int4 and not is_mxfp4:
         inter_size = list(w13.shape)[-1] // 2
     else:
         inter_size = list(w13.shape)[-2] // 2
@@ -689,8 +623,7 @@ def xpu_fused_moe(hidden_states,
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
 
-    if not is_fp8 and not is_int4 and not is_mxfp4 and not is_block_fp8 \
-            and not is_mxfp4_fp8:
+    if not is_fp8 and not is_int4 and not is_mxfp4 and not is_block_fp8:
         gemm1_scales = None
         gemm2_scales = None
     else:

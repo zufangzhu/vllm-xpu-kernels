@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
+
 from . import _C  # noqa: F401
 from . import _xpu_C  # noqa: F401
 
