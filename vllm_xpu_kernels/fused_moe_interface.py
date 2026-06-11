@@ -117,11 +117,13 @@ def _naive_fused_moe_activation(gemm1_output, activation):
     elif activation == "gelu_tanh":
         return torch.nn.functional.gelu(gemm1_output, approximate="tanh")
     elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
-        return torch.nn.functional.silu(gemm1_output) * 1.702 * 7.0
+        gate, up = gemm1_output.chunk(2, dim=-1)
+        return torch.nn.functional.silu(gate) * up * 1.702 * 7.0
     elif activation == "relu2_no_mul":
         return torch.nn.functional.relu(gemm1_output).pow(2)
     elif activation == "swiglustep":
-        return torch.nn.functional.relu(gemm1_output - 7.0).sign() * 7.0
+        gate, up = gemm1_output.chunk(2, dim=-1)
+        return torch.nn.functional.relu(gate - 7.0).sign() * up * 7.0
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
@@ -174,7 +176,6 @@ def ref_fused_moe(recipe,
                   gemm1_clamp_limit: Optional[float]=None):
 
     compute_dtype = x.dtype
-    dequant_dtype=torch.float32
 
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_weights.view(-1, 1)
