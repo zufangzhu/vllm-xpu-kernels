@@ -13,8 +13,8 @@ except ImportError as e:
     FUSEDMOE_UNAVAILABLE_REASON = str(e)
     FUSEDMOE_AVAILABLE = False
 from ._mx_utils import (dequant_fp8_block_act, dequant_fp8_block_wei,
-                        dequant_mxfp4, dequant_mxfp8, quant_fp8_block_act,
-                        quant_mxfp_act_xpu)
+                        dequant_mxfp4, dequant_mxfp8, qdq_fp8_act,
+                        quant_fp8_block_act, quant_mxfp_act_xpu)
 
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
 
@@ -174,8 +174,39 @@ def ref_fused_moe(recipe,
                   ep_rank=0,
                   ep_size=1,
                   gemm1_clamp_limit: Optional[float]=None):
+    """
+    Reference fused MoE implementation with quantization simulation.
 
+    Supported recipes:
+        bf16          - no quantization (direct matmul)
+        fp8block      - block-wise fp8 quant/dequant on activations and weights
+        mxfp8         - mxfp8 (per-32-element group)
+        mxfp4         - mxfp4 (per-32-element group)
+        fp8           - per-tensor fp8 quant/dequant on activations
+
+    NOT supported (raise NotImplementedError):
+        int4
+
+    Dimension constraints per recipe:
+        fp8block: hidden_size % 128 == 0 (act quant group=128)
+        mxfp8:    hidden_size % 32 == 0  (act quant block=32)
+        mxfp4:    hidden_size % 32 == 0  (act quant block=32)
+                  additionally, per-expert intermediate activations must satisfy
+                  n_tokens * inter_per_card % 32 == 0 at runtime.
+    """
     compute_dtype = x.dtype
+
+    # --- dimension validation ---
+    if recipe == "int4":
+        raise NotImplementedError("ref path does not support int4 recipe.")
+
+    hidden_size = x.shape[-1]
+    if recipe == "fp8block":
+        assert hidden_size % 128 == 0, \
+            f"fp8block requires hidden_size % 128 == 0, got {hidden_size}"
+    elif recipe in ("mxfp8", "mxfp4"):
+        assert hidden_size % 32 == 0, \
+            f"{recipe} requires hidden_size % 32 == 0, got {hidden_size}"
 
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_weights.view(-1, 1)
@@ -197,6 +228,8 @@ def ref_fused_moe(recipe,
     elif recipe == "mxfp4":
         _q, _scale = quant_mxfp_act_xpu(x, "mxfp4")
         x = dequant_mxfp4(_q, _scale)
+    elif recipe == "fp8":
+        x = qdq_fp8_act(x)
 
     for expert_id, end_idx in enumerate(tokens_per_expert):
         start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
@@ -219,6 +252,10 @@ def ref_fused_moe(recipe,
         elif recipe == "mxfp8":
             expert_w13 = dequant_mxfp8(w13[expert_id], w13_scales[expert_id])
             expert_w2 = dequant_mxfp8(w2[expert_id], w2_scales[expert_id])
+        elif recipe == "fp8":
+            # per-tensor fp8 weights with scalar scales per expert
+            expert_w13 = w13[expert_id].float() * w13_scales[expert_id]
+            expert_w2 = w2[expert_id].float() * w2_scales[expert_id]
         else:
             # bf16 / fp16
             expert_w13 = w13[expert_id]

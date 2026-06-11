@@ -62,15 +62,16 @@ def _fp4_e2m1fn_x2_to_float_lut(
     return out
 
 def dequant_mxfp4(x_lp, x_scale):
-    act_ori_shape = x_lp.shape
+    ori_shape = x_lp.shape
     x = _fp4_e2m1fn_x2_to_float_lut(x_lp).reshape(-1, 32) * (x_scale.reshape(
             -1, 1).to(torch.float32))
-    return x.reshape(act_ori_shape[:-1] + (act_ori_shape[-1] * 2, ))
+    return x.reshape(ori_shape[:-1] + (ori_shape[-1] * 2, ))
 
 def dequant_mxfp8(x_lp, x_scale):
-    act_ori_shape = x_lp.shape
-    x = x_lp.to(torch.float32).reshape(-1, 32) * (x_scale.reshape(-1, 1).to(torch.float32))
-    return x.reshape(act_ori_shape)
+    ori_shape = x_lp.shape
+    x = x_lp.to(torch.float32).reshape(-1, 32) * \
+        (x_scale.reshape(-1, 1).to(torch.float32))
+    return x.reshape(ori_shape)
 
 def quant_mxfp_act_xpu(x, recipe):
     assert recipe in ("mxfp8", "mxfp4")
@@ -108,12 +109,13 @@ def _quant_mxfp4_act_xpu(x):
     M, N = x.shape
     # Packed FP4 output: two nibbles per byte
     x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
-    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
+    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device)
 
     torch.ops._C.per_token_group_quant_mxfp4(x, x_q, x_s, MXFP4_BLOCK_SIZE, eps)
 
     x_q = x_q.view(torch.float4_e2m1fn_x2)
-    x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    x_s = x_s.to(dtype=torch.float8_e8m0fnu, 
+                 memory_format=torch.preserve_format)
     return x_q, x_s
 
 def qdq_fp8_act(x):
