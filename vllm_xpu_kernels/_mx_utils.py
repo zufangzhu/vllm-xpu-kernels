@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
-
+import vllm_xpu_kernels._C  # noqa: F401
+import vllm_xpu_kernels._moe_C  # noqa: F401
+import vllm_xpu_kernels._xpu_C  #
 # largest power of 2 representable in `torch.float8_e4m3fn`
 F8E4M3_LARGEST_POW2 = 8
 # largest power of 2 representable in `torch.float4_e2m1fn_x2`
@@ -149,7 +151,59 @@ def _floatx_unpacked_to_f32(x: torch.Tensor,
 
     return result.view(torch.float)
 
+_FP4_E2M1_LUT = torch.tensor(
+    [
+         0.0,  0.5,  1.0,  1.5,
+         2.0,  3.0,  4.0,  6.0,
+        -0.0, -0.5, -1.0, -1.5,
+        -2.0, -3.0, -4.0, -6.0,
+    ],
+    dtype=torch.float32,
+)
 
+_FP4_E2M1_LUT_XPU = None
+
+def get_lut(device):
+    global _FP4_E2M1_LUT_XPU
+    if _FP4_E2M1_LUT_XPU is None:
+        _FP4_E2M1_LUT_XPU = _FP4_E2M1_LUT.to(device)
+    return _FP4_E2M1_LUT_XPU
+
+
+def fp4_e2m1fn_x2_to_float_xpu(
+    packed: torch.Tensor,
+) -> torch.Tensor:
+    """
+    packed:
+        float4_e2m1fn_x2 tensor
+        shape [..., N]
+
+    return:
+        fp32 tensor
+        shape [..., N*2]
+    """
+
+    lut = get_lut(packed.device)
+
+    u8 = packed.view(torch.uint8)
+
+    lo = u8 & 0xF
+    hi = u8 >> 4
+
+    lo_fp = lut[lo.long()]
+    hi_fp = lut[hi.long()]
+
+    out = torch.empty(
+        *u8.shape[:-1],
+        u8.shape[-1] * 2,
+        device=u8.device,
+        dtype=torch.float32,
+    )
+
+    out[..., 0::2] = lo_fp
+    out[..., 1::2] = hi_fp
+
+    return out
 
 def unpack_uint4(uint8_data) -> torch.Tensor:
     # Take a packed uint8 tensor (i.e. nvfp4) and unpack into
@@ -472,6 +526,52 @@ def quant_mxfp_act(x, recipe):
     return x, x_scale
 
 
+def quant_mxfp_act_xpu(x, recipe):
+    assert recipe in ("mxfp8", "mxfp4")
+    if recipe == "mxfp8":
+        return quant_mxfp8_act_xpu(x)
+    else:
+        return quant_mxfp4_act_xpu(x)
+
+def quant_mxfp8_act_xpu(x):
+    MXFP8_BLOCK_SIZE = 32
+    assert x.shape[-1] % MXFP8_BLOCK_SIZE == 0
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    fp8_min = finfo.min
+    fp8_max = finfo.max
+    eps = 1e-10
+    x_q = torch.empty_like(x, device=x.device, dtype=torch.float8_e4m3fn)
+    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
+    x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+    torch.ops._C.per_token_group_fp8_quant(
+        x,
+        x_q,
+        x_s,
+        MXFP8_BLOCK_SIZE,
+        eps,
+        fp8_min,
+        fp8_max,
+        True,
+        False,
+        False,  # dummy_is_scale_transposed, dummy_is_tma_aligned
+    )
+    x_s = x_s.to(torch.float8_e8m0fnu)
+    return x_q, x_s
+
+def quant_mxfp4_act_xpu(x):
+    MXFP4_BLOCK_SIZE = 32
+    eps = 1e-10
+    M, N = x.shape
+    # Packed FP4 output: two nibbles per byte
+    x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
+    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
+
+    torch.ops._C.per_token_group_quant_mxfp4(x, x_q, x_s, MXFP4_BLOCK_SIZE, eps)
+
+    x_q = x_q.view(torch.float4_e2m1fn_x2)
+    x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    return x_q, x_s
+    
 def reorder_mxfp_scales(A_scales, expert_first_token_offset):
     token_per_group = expert_first_token_offset[
         1:] - expert_first_token_offset[:-1]
