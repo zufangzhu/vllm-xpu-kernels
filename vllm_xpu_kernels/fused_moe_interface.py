@@ -109,21 +109,19 @@ def fused_moe_activation(act_output, gemm1_output, activation):
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
-def _naive_fused_moe_activation(gemm1_output, activation):
+def _naive_fused_moe_activation(gate_out, activation):
     if activation == "silu":
-        return torch.nn.functional.silu(gemm1_output)
+        return torch.nn.functional.silu(gate_out)
     elif activation == "gelu":
-        return torch.nn.functional.gelu(gemm1_output)
+        return torch.nn.functional.gelu(gate_out)
     elif activation == "gelu_tanh":
-        return torch.nn.functional.gelu(gemm1_output, approximate="tanh")
+        return torch.nn.functional.gelu(gate_out, approximate="tanh")
     elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
-        gate, up = gemm1_output.chunk(2, dim=-1)
-        return torch.nn.functional.silu(gate) * up * 1.702 * 7.0
+        return torch.nn.functional.silu(gate_out) * 1.702 * 7.0
     elif activation == "relu2_no_mul":
-        return torch.nn.functional.relu(gemm1_output).pow(2)
+        return torch.nn.functional.relu(gate_out).pow(2)
     elif activation == "swiglustep":
-        gate, up = gemm1_output.chunk(2, dim=-1)
-        return torch.nn.functional.relu(gate - 7.0).sign() * up * 7.0
+        return torch.nn.functional.relu(gate_out - 7.0).sign() * 7.0
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
@@ -274,27 +272,27 @@ def ref_fused_moe(recipe,
             w1_bias, w3_bias = w13_bias[expert_id, :].chunk(2)
 
         if recipe in ("fp8block", "mxfp8"):
-            gemm1 = expert_tokens @ w1.to(compute_dtype)
+            gate_out = expert_tokens @ w1.to(compute_dtype)
         else:
-            gemm1 = expert_tokens @ w1.T.to(compute_dtype)
+            gate_out = expert_tokens @ w1.T.to(compute_dtype)
         if w13_bias is not None:
-            gemm1 += w1_bias.to(compute_dtype)
+            gate_out += w1_bias.to(compute_dtype)
 
         if recipe in ("fp8block", "mxfp8"):
-            up = expert_tokens @ w3.to(compute_dtype)
+            up_out = expert_tokens @ w3.to(compute_dtype)
         else:
-            up = expert_tokens @ w3.T.to(compute_dtype)
+            up_out = expert_tokens @ w3.T.to(compute_dtype)
         if w13_bias is not None:
-            up += w3_bias.to(compute_dtype)
+            up_out += w3_bias.to(compute_dtype)
 
         if gemm1_clamp_limit is not None and gemm1_clamp_limit > 0:
-            gemm1.clamp_(max=gemm1_clamp_limit)
-            up.clamp_(min=-gemm1_clamp_limit, max=gemm1_clamp_limit)
+            gate_out.clamp_(max=gemm1_clamp_limit)
+            up_out.clamp_(min=-gemm1_clamp_limit, max=gemm1_clamp_limit)
 
-        gate = _naive_fused_moe_activation(gemm1, activation)
+        act_gate = _naive_fused_moe_activation(gate_out, activation)
 
         ### quant act for gemm2 and dequant weight 2
-        gemm2_input = gate * up
+        gemm2_input = act_gate * up_out
         if recipe == "fp8block":
             _q, _scale = quant_fp8_block_act(gemm2_input)
             gemm2_input = dequant_fp8_block_act(_q, _scale)
