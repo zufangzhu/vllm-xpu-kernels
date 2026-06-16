@@ -73,6 +73,10 @@ def dequant_mxfp8(x_lp, x_scale):
         (x_scale.reshape(-1, 1).to(torch.float32))
     return x.reshape(ori_shape)
 
+def dequant_mxfp8_wei(wei, wei_scale):
+    wei_scale = wei_scale.view(torch.float8_e8m0fnu).to(torch.float32)
+    return wei.to(torch.float32) * wei_scale.repeat_interleave(32, dim=0)
+
 def quant_mxfp_act_xpu(x, recipe):
     assert recipe in ("mxfp8", "mxfp4")
     if recipe == "mxfp8":
@@ -189,7 +193,7 @@ def dequant_wei(wei, wei_scale, recipe):
     if recipe in ("mxfp4", "mxfp4_fp8"):
         return dequant_mxfp4(wei, _as_e8m0(wei_scale))
     elif recipe == "mxfp8":
-        return dequant_mxfp8(wei, _as_e8m0(wei_scale))
+        return dequant_mxfp8_wei(wei, _as_e8m0(wei_scale))
     elif recipe == "fp8block":
         return dequant_fp8_block_wei(wei, wei_scale)
     elif recipe == "fp8":
