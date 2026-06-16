@@ -181,18 +181,22 @@ def qdq_act(x, recipe):
     elif recipe == "mxfp8":
         _aq, _as = quant_mxfp_act_xpu(x, "mxfp8")
         return dequant_mxfp8(_aq, _as)
+    else:
+        # bf16: no quantization noise, return unchanged
+        return x
 
 def dequant_wei(wei, wei_scale, recipe):
     if recipe in ("mxfp4", "mxfp4_fp8"):
         return dequant_mxfp4(wei, _as_e8m0(wei_scale))
     elif recipe == "mxfp8":
-        return dequant_mxfp8(wei, wei_scale)
+        return dequant_mxfp8(wei, _as_e8m0(wei_scale))
     elif recipe == "fp8block":
         return dequant_fp8_block_wei(wei, wei_scale)
     elif recipe == "fp8":
         return wei.float() * wei_scale.float()
     else:
-        raise ValueError(f"Unsupported recipe: {recipe}")
+        # bf16: weights are already in compute dtype
+        return wei
 
 
 def ref_fused_moe_activation(act_output, gemm1_output, activation):
@@ -238,6 +242,7 @@ def ref_fused_moe(recipe,
         fp8block      - block-wise fp8 quant/dequant on activations and weights
         mxfp8         - mxfp8 (per-32-element group)
         mxfp4         - mxfp4 (per-32-element group)
+        mxfp4_fp8     - mxfp4 weights + per-tensor fp8 activations
         fp8           - per-tensor fp8 quant/dequant on activations
 
     NOT supported (raise NotImplementedError):
@@ -250,12 +255,14 @@ def ref_fused_moe(recipe,
                   additionally, per-expert intermediate activations must satisfy
                   n_tokens * inter_per_card % 32 == 0 at runtime.
     """
-    assert recipe in ("bf16", "fp8block", "mxfp8", "mxfp4", "fp8"), \
-        f"Unsupported recipe: {recipe}"
+    assert recipe in ("bf16", "fp8block", "mxfp8", "mxfp4", \
+        "mxfp4_fp8", "fp8"), f"Unsupported recipe: {recipe}"
     
     num_rows, hidden_size = hidden_states.shape
-    # weight layout: [E, 2*inter_size, hidden_size // 2]
-    inter_size = w13.shape[-2] // 2
+    if recipe in ("mxfp4", "mxfp4_fp8"):
+        inter_size = w13.shape[-2] // 2
+    else:
+        inter_size = w13.shape[-1] // 2
     num_moe_inputs = n_experts_per_token * num_rows
     compute_dtype = hidden_states.dtype
 
@@ -314,7 +321,10 @@ def ref_fused_moe(recipe,
         tokens_i_qdq = qdq_act(tokens_i, recipe).to(compute_dtype)
         # weight dequant
         w13_i = dequant_wei(w13[i], w13_scales[i], recipe).to(compute_dtype)
-        out_i = tokens_i_qdq @ w13_i.T
+        if recipe in ("fp8block", "mxfp8"):
+            out_i = tokens_i_qdq @ w13_i
+        else:
+            out_i = tokens_i_qdq @ w13_i.T
         if w13_bias is not None:
             out_i = out_i + w13_bias[i].to(compute_dtype)
         gemm1_output[offset:offset + n_tokens] = out_i
@@ -345,7 +355,10 @@ def ref_fused_moe(recipe,
         # weight dequant
         w2_i = dequant_wei(w2[i], w2_scales[i], recipe).to(compute_dtype)
 
-        out_i = act_i_qdq @ w2_i.T
+        if recipe in ("fp8block", "mxfp8"):
+            out_i = act_i_qdq @ w2_i
+        else:
+            out_i = act_i_qdq @ w2_i.T
         if w2_bias is not None:
             out_i = out_i + w2_bias[i].to(compute_dtype)
         gemm2_output[offset:offset + n_tokens] = out_i
