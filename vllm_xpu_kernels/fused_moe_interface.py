@@ -12,9 +12,8 @@ try:
 except ImportError as e:
     FUSEDMOE_UNAVAILABLE_REASON = str(e)
     FUSEDMOE_AVAILABLE = False
-from ._mx_utils import (dequant_fp8_block_act, dequant_fp8_block_wei,
-                        dequant_mxfp4, dequant_mxfp8, qdq_fp8_act,
-                        quant_fp8_block_act, quant_mxfp_act_xpu)
+
+from .ref_moe_utils import ref_fused_moe
 
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
 
@@ -109,23 +108,6 @@ def fused_moe_activation(act_output, gemm1_output, activation):
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
-def _naive_fused_moe_activation(gate_out, activation):
-    if activation == "silu":
-        return torch.nn.functional.silu(gate_out)
-    elif activation == "gelu":
-        return torch.nn.functional.gelu(gate_out)
-    elif activation == "gelu_tanh":
-        return torch.nn.functional.gelu(gate_out, approximate="tanh")
-    elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
-        return torch.nn.functional.silu(gate_out) * 1.702 * 7.0
-    elif activation == "relu2_no_mul":
-        return torch.nn.functional.relu(gate_out).pow(2)
-    elif activation == "swiglustep":
-        return torch.nn.functional.relu(gate_out - 7.0).sign() * 7.0
-    else:
-        raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
-
-
 def implement_zp(qweight):
     # change u4 to s4 to avoid zero point in gemm kernel
     # only support default zero point now
@@ -155,168 +137,6 @@ def implement_zp(qweight):
     result = pack_compact(high_s8, low_s8)
 
     return result
-
-def ref_fused_moe(recipe,
-                  x,
-                  w13,
-                  w13_scales,
-                  w13_bias,
-                  w2,
-                  w2_scales,
-                  w2_bias,
-                  expert_weights,
-                  expert_indices,
-                  num_per_tok,
-                  activation,
-                  num_experts,
-                  ep_rank=0,
-                  ep_size=1,
-                  gemm1_clamp_limit: Optional[float]=None):
-    """
-    Reference fused MoE implementation with quantization simulation.
-
-    Supported recipes:
-        bf16          - no quantization (direct matmul)
-        fp8block      - block-wise fp8 quant/dequant on activations and weights
-        mxfp8         - mxfp8 (per-32-element group)
-        mxfp4         - mxfp4 (per-32-element group)
-        fp8           - per-tensor fp8 quant/dequant on activations
-
-    NOT supported (raise NotImplementedError):
-        int4
-
-    Dimension constraints per recipe:
-        fp8block: hidden_size % 128 == 0 (act quant group=128)
-        mxfp8:    hidden_size % 32 == 0  (act quant block=32)
-        mxfp4:    hidden_size % 32 == 0  (act quant block=32)
-                  additionally, per-expert intermediate activations must satisfy
-                  n_tokens * inter_per_card % 32 == 0 at runtime.
-    """
-    compute_dtype = x.dtype
-
-    # --- dimension validation ---
-    if recipe == "int4":
-        raise NotImplementedError("ref path does not support int4 recipe.")
-
-    hidden_size = x.shape[-1]
-    if recipe == "fp8block":
-        assert hidden_size % 128 == 0, \
-            f"fp8block requires hidden_size % 128 == 0, got {hidden_size}"
-    elif recipe in ("mxfp8", "mxfp4"):
-        assert hidden_size % 32 == 0, \
-            f"{recipe} requires hidden_size % 32 == 0, got {hidden_size}"
-
-    flat_expert_indices = expert_indices.view(-1)
-    flat_expert_weights = expert_weights.view(-1, 1)
-
-    expert_start_id = num_experts * ep_rank
-    expert_end_id = expert_start_id + num_experts
-    expert_cache = torch.zeros_like(x)
-    idxs = flat_expert_indices.argsort()
-    counts = flat_expert_indices.bincount().cpu().numpy()
-    tokens_per_expert = counts.cumsum()
-    token_idxs = idxs // num_per_tok
-
-    if recipe == "fp8block":
-        _q, _scale = quant_fp8_block_act(x)
-        x = dequant_fp8_block_act(_q, _scale)
-    elif recipe == "mxfp8":
-        _q, _scale = quant_mxfp_act_xpu(x, "mxfp8")
-        x = dequant_mxfp8(_q, _scale)
-    elif recipe == "mxfp4":
-        _q, _scale = quant_mxfp_act_xpu(x, "mxfp4")
-        x = dequant_mxfp4(_q, _scale)
-    elif recipe == "fp8":
-        x = qdq_fp8_act(x)
-
-    for expert_id, end_idx in enumerate(tokens_per_expert):
-        start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
-        if (start_idx == end_idx) or (expert_id
-                                      < expert_start_id) or (expert_id
-                                                             >= expert_end_id):
-            continue
-        exp_token_idxs = token_idxs[start_idx:end_idx]
-        expert_tokens = x[exp_token_idxs].to(compute_dtype)
-
-        ### dequant weight13 and weight2
-        if recipe in ("mxfp4"):
-            expert_w13 = dequant_mxfp4(w13[expert_id], w13_scales[expert_id])
-            expert_w2 = dequant_mxfp4(w2[expert_id], w2_scales[expert_id])
-        elif recipe == "fp8block":
-            expert_w13 = dequant_fp8_block_wei(w13[expert_id, :, :],
-                                         w13_scales[expert_id, :, :])
-            expert_w2 = dequant_fp8_block_wei(w2[expert_id, :, :],
-                                        w2_scales[expert_id, :, :])
-        elif recipe == "mxfp8":
-            expert_w13 = dequant_mxfp8(w13[expert_id], w13_scales[expert_id])
-            expert_w2 = dequant_mxfp8(w2[expert_id], w2_scales[expert_id])
-        elif recipe == "fp8":
-            # per-tensor fp8 weights with scalar scales per expert
-            expert_w13 = w13[expert_id].float() * w13_scales[expert_id]
-            expert_w2 = w2[expert_id].float() * w2_scales[expert_id]
-        else:
-            # bf16 / fp16
-            expert_w13 = w13[expert_id]
-            expert_w2 = w2[expert_id]
-
-        ### split w13 to w1 and w3
-        if recipe in ("fp8block", "mxfp8"):
-            inter = expert_w13.shape[-1] // 2
-            w1, w3 = torch.split(expert_w13, inter, dim=-1)
-        else:
-            w1, w3 = torch.split(expert_w13,
-                                expert_w13.shape[0] // 2,
-                                dim=0)
-
-        if w13_bias is not None:
-            w1_bias, w3_bias = w13_bias[expert_id, :].chunk(2)
-
-        if recipe in ("fp8block", "mxfp8"):
-            gate_out = expert_tokens @ w1.to(compute_dtype)
-        else:
-            gate_out = expert_tokens @ w1.T.to(compute_dtype)
-        if w13_bias is not None:
-            gate_out += w1_bias.to(compute_dtype)
-
-        if recipe in ("fp8block", "mxfp8"):
-            up_out = expert_tokens @ w3.to(compute_dtype)
-        else:
-            up_out = expert_tokens @ w3.T.to(compute_dtype)
-        if w13_bias is not None:
-            up_out += w3_bias.to(compute_dtype)
-
-        if gemm1_clamp_limit is not None and gemm1_clamp_limit > 0:
-            gate_out.clamp_(max=gemm1_clamp_limit)
-            up_out.clamp_(min=-gemm1_clamp_limit, max=gemm1_clamp_limit)
-
-        act_gate = _naive_fused_moe_activation(gate_out, activation)
-
-        ### quant act for gemm2 and dequant weight 2
-        gemm2_input = act_gate * up_out
-        if recipe == "fp8block":
-            _q, _scale = quant_fp8_block_act(gemm2_input)
-            gemm2_input = dequant_fp8_block_act(_q, _scale)
-        elif recipe == "mxfp8":
-            _q, _scale = quant_mxfp_act_xpu(gemm2_input, "mxfp8")
-            gemm2_input = dequant_mxfp8(_q, _scale)
-        elif recipe == "mxfp4":
-            _q, _scale = quant_mxfp_act_xpu(gemm2_input, "mxfp4")
-            gemm2_input = dequant_mxfp4(_q, _scale)
-
-        gemm2_input = gemm2_input.to(compute_dtype)
-        if recipe in ("fp8block", "mxfp8"):
-            expert_out = gemm2_input @ expert_w2.to(compute_dtype)
-        else:
-            expert_out = gemm2_input @ expert_w2.T.to(compute_dtype)
-
-        if w2_bias is not None:
-            expert_out += w2_bias[expert_id, :].to(compute_dtype)
-
-        expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
-        expert_cache.index_add_(0, exp_token_idxs, expert_out)
-
-    expert_cache = expert_cache.to(x.dtype)
-    return expert_cache
 
 class XpuFusedMoe:
     def __init__(
@@ -449,23 +269,23 @@ class XpuFusedMoe:
         topk_ids,
         expert_map=None,
     ):
-        out = ref_fused_moe(recipe=self.recipe,
-                            x=hidden_states,
+        return ref_fused_moe(recipe=self.recipe,
+                            output=output,
+                            hidden_states=hidden_states,
                             w13=self.w13,
                             w13_scales=self.gemm1_scales,
                             w13_bias=self.w13_bias,
                             w2=self.w2,
                             w2_scales=self.gemm2_scales,
                             w2_bias=self.w2_bias,
-                            expert_weights=topk_weights,
-                            expert_indices=topk_ids,
-                            num_per_tok=self.n_experts_per_token,
+                            topk_weights=topk_weights,
+                            topk_ids=topk_ids,
+                            n_experts_per_token=self.n_experts_per_token,
                             activation=self.activation,
                             num_experts=self.num_experts,
                             ep_rank=self.ep_rank,
                             ep_size=self.ep_size,
-                            gemm1_clamp_limit=self.gemm1_clamp_limit)
-        output.copy_(out)
+                            expert_map=expert_map)
 
     def _apply_kernel(
         self,
