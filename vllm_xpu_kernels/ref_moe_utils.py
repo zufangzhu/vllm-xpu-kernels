@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
-from typing import Optional
 
 from . import _C  # noqa: F401
 from . import _xpu_C  # noqa: F401
@@ -251,7 +250,7 @@ def ref_fused_moe(recipe,
                   additionally, per-expert intermediate activations must satisfy
                   n_tokens * inter_per_card % 32 == 0 at runtime.
     """
-    assert recipe in ("bf16", "fp8block", "mxfp8", "mxfp4", "fp8", "mxfp4_fp8"), \
+    assert recipe in ("bf16", "fp8block", "mxfp8", "mxfp4", "fp8"), \
         f"Unsupported recipe: {recipe}"
     
     num_rows, hidden_size = hidden_states.shape
@@ -313,7 +312,7 @@ def ref_fused_moe(recipe,
 
         # activation: quant → dequant round-trip
         tokens_i_qdq = qdq_act(tokens_i, recipe).to(compute_dtype)
-        # weight dequant: [2*inter_size, hidden_size//2] → [2*inter_size, hidden_size]
+        # weight dequant
         w13_i = dequant_wei(w13[i], w13_scales[i], recipe).to(compute_dtype)
         out_i = tokens_i_qdq @ w13_i.T
         if w13_bias is not None:
@@ -330,9 +329,6 @@ def ref_fused_moe(recipe,
     ref_fused_moe_activation(act_output, gemm1_output, activation)
 
     # ---- GEMM2: cutlass grouped GEMM replaced by torch matmul ----
-    # w2 layout: [E, hidden_size, inter_size // 2]  (packed fp4)
-    # After dequant:  [hidden_size, inter_size]
-    # matmul per expert: [n_i, inter_size] @ [inter_size, hidden_size]
     gemm2_output = torch.zeros((num_moe_inputs, hidden_size),
                                dtype=compute_dtype,
                                device=hidden_states.device)
@@ -346,7 +342,7 @@ def ref_fused_moe(recipe,
         # activation: quant → dequant round-trip
         act_i_qdq = qdq_act(act_i, recipe).to(compute_dtype)
 
-        # weight dequant: [hidden_size, inter_size//2] → [hidden_size, inter_size]
+        # weight dequant
         w2_i = dequant_wei(w2[i], w2_scales[i], recipe).to(compute_dtype)
 
         out_i = act_i_qdq @ w2_i.T
