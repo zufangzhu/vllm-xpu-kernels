@@ -16,7 +16,7 @@ except ImportError as e:
 from .ref_moe_utils import ref_fused_moe
 
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
-
+USE_MXFP4_FP8_ENV = "VLLM_XPU_FUSED_MOE_USE_MXFP4_FP8"
 
 def _is_env_enabled(env_name: str, default: str = "0") -> bool:
     value = os.environ.get(env_name, default).strip().upper()
@@ -35,7 +35,7 @@ def _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8):
     elif is_block_fp8:
         return "fp8block"
     elif is_mxfp4:
-        return "mxfp4"
+        return "mxfp4_fp8" if _is_env_enabled(USE_MXFP4_FP8_ENV) else "mxfp4"
     elif is_int4:
         return "int4"
     elif is_fp8:
