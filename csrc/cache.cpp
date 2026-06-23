@@ -108,9 +108,9 @@ class reshape_and_cache_kernel {
 };
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
-class reshape_and_cache_flash_new_layout_kernel {
+class reshape_and_cache_flash_strided_kernel {
  public:
-  reshape_and_cache_flash_new_layout_kernel(
+  reshape_and_cache_flash_strided_kernel(
       const scalar_t* __restrict__ key,
       const scalar_t* __restrict__ value,
       cache_t* __restrict__ cache,
@@ -901,28 +901,25 @@ void reshape_and_cache(
       key.scalar_type(), kv_cache_dtype, CALL_RESHAPE_AND_CACHE);
 }
 
-#define CALL_RESHAPE_AND_CACHE_FLASH_NEW_LAYOUT(KV_T, CACHE_T, KV_DTYPE) \
-  queue.submit([&](sycl::handler& cgh) {                                 \
-    cgh.parallel_for(                                                    \
-        sycl::nd_range<1>(grid * block, block),                          \
-        vllm::reshape_and_cache_flash_new_layout_kernel<                 \
-            KV_T,                                                        \
-            CACHE_T,                                                     \
-            KV_DTYPE>(                                                   \
-            reinterpret_cast<KV_T*>(key.data_ptr()),                     \
-            reinterpret_cast<KV_T*>(value.data_ptr()),                   \
-            reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),            \
-            slot_mapping.data_ptr<int64_t>(),                            \
-            block_stride,                                                \
-            page_stride,                                                 \
-            head_stride,                                                 \
-            key_stride,                                                  \
-            value_stride,                                                \
-            num_heads,                                                   \
-            head_size,                                                   \
-            block_size,                                                  \
-            reinterpret_cast<const float*>(k_scale.data_ptr()),          \
-            reinterpret_cast<const float*>(v_scale.data_ptr())));        \
+#define CALL_RESHAPE_AND_CACHE_FLASH_STRIDED(KV_T, CACHE_T, KV_DTYPE)          \
+  queue.submit([&](sycl::handler& cgh) {                                       \
+    cgh.parallel_for(                                                          \
+        sycl::nd_range<1>(grid * block, block),                                \
+        vllm::reshape_and_cache_flash_strided_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+            reinterpret_cast<KV_T*>(key.data_ptr()),                           \
+            reinterpret_cast<KV_T*>(value.data_ptr()),                         \
+            reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                  \
+            slot_mapping.data_ptr<int64_t>(),                                  \
+            block_stride,                                                      \
+            page_stride,                                                       \
+            head_stride,                                                       \
+            key_stride,                                                        \
+            value_stride,                                                      \
+            num_heads,                                                         \
+            head_size,                                                         \
+            block_size,                                                        \
+            reinterpret_cast<const float*>(k_scale.data_ptr()),                \
+            reinterpret_cast<const float*>(v_scale.data_ptr())));              \
   });
 
 // KV_T is the stored data type of kv-cache.
@@ -989,7 +986,7 @@ void reshape_and_cache_flash(
     DISPATCH_BY_KV_CACHE_DTYPE(
         key.scalar_type(),
         kv_cache_dtype,
-        CALL_RESHAPE_AND_CACHE_FLASH_NEW_LAYOUT);
+        CALL_RESHAPE_AND_CACHE_FLASH_STRIDED);
   } else {
     sycl::range<1> grid(num_tokens);
     sycl::range<1> block(std::min(num_heads * head_size, 1024));
