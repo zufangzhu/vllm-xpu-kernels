@@ -28,6 +28,16 @@ def fused_input_norm(out: torch.Tensor, input: torch.Tensor,
     torch.ops._xpu_C.fused_input_norm(out, input, weight, bias)
 
 
+def compute_slot_mapping(query_start_loc: torch.Tensor,
+                         positions: torch.Tensor,
+                         block_table: torch.Tensor,
+                         slot_mapping: torch.Tensor, block_size: int,
+                         pad_id: int) -> None:
+    torch.ops._xpu_C.compute_slot_mapping(query_start_loc, positions,
+                                           block_table, slot_mapping,
+                                           block_size, pad_id)
+
+
 def gemma_rms_norm(out: torch.Tensor, input: torch.Tensor,
                    weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)

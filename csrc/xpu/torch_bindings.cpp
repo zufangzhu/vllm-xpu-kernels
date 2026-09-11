@@ -328,6 +328,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "fused_input_norm(Tensor! out, Tensor input, Tensor weight, "
       "Tensor bias) -> ()");
   xpu_ops.impl("fused_input_norm", torch::kXPU, &fused_input_norm);
+
+  xpu_ops.def(
+      "compute_slot_mapping(Tensor query_start_loc, Tensor positions, "
+      "Tensor block_table, Tensor! slot_mapping, int block_size, "
+      "int pad_id) -> ()");
+  xpu_ops.impl("compute_slot_mapping", torch::kXPU, &compute_slot_mapping);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

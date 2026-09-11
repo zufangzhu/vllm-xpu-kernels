@@ -402,3 +402,11 @@ void fused_input_norm(
     torch::Tensor& input,
     torch::Tensor& weight,
     torch::Tensor& bias);
+
+void compute_slot_mapping(
+    const torch::Tensor& query_start_loc,
+    const torch::Tensor& positions,
+    const torch::Tensor& block_table,
+    torch::Tensor& slot_mapping,
+    int64_t block_size,
+    int64_t pad_id);
